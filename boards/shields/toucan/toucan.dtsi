@@ -107,11 +107,21 @@
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_abs_pointer>;
-        scroller {
-            layers = <1 2>;
-            input-processors = <&toucan_edge_scroll>;
-        };
+        input-processors = <&toucan_circular_scroll &toucan_abs_pointer>;
+    };
+
+    toucan_circular_scroll: toucan_circular_scroll {
+        compatible = "zmk,input-processor-circular-scroll";
+        #input-processor-cells = <0>;
+        pressure-threshold = <8>;
+        x-max = <2047>;
+        y-max = <1535>;
+        inner-ring-pct = <72>;
+        sector-half-angle-deg = <30>;
+        activation-angle-deg = <10>;
+        scroll-angle-deg = <12>;
+        invert-horizontal;
+        status = "okay";
     };
 
     toucan_abs_pointer: toucan_abs_pointer {
@@ -121,19 +131,6 @@
         x-div = <8>;
         y-div = <8>;
         max-rel = <40>;
-        status = "okay";
-    };
-
-    toucan_edge_scroll: toucan_edge_scroll {
-        compatible = "zmk,input-processor-edge-scroll";
-        #input-processor-cells = <0>;
-        right-zone-pct = <18>;
-        top-zone-pct = <18>;
-        pressure-threshold = <8>;
-        scroll-div = <16>;
-        x-max = <2047>;
-        y-max = <1535>;
-        invert-horizontal;
         status = "okay";
     };
 };

@@ -3,7 +3,7 @@ config ZMK_INPUT_PROCESSOR_ABSOLUTE_REL_POINTER
     default y
     depends on DT_HAS_ZMK_INPUT_PROCESSOR_ABSOLUTE_REL_POINTER_ENABLED
 
-config ZMK_INPUT_PROCESSOR_EDGE_SCROLL
-    bool "Toucan edge scroll input processor"
+config ZMK_INPUT_PROCESSOR_CIRCULAR_SCROLL
+    bool "Toucan circular scroll input processor"
     default y
-    depends on DT_HAS_ZMK_INPUT_PROCESSOR_EDGE_SCROLL_ENABLED
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_CIRCULAR_SCROLL_ENABLED
