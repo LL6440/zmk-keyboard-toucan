@@ -111,7 +111,6 @@
         scroller {
             layers = <1 2>;
             input-processors = <&toucan_edge_scroll>;
-            process-next;
         };
     };
 
