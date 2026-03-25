@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT
+
+description: Convert absolute trackpad coordinates to relative cursor deltas
+
+compatible: "zmk,input-processor-absolute-rel-pointer"
+
+include: ip_zero_param.yaml
+
+properties:
+  pressure-threshold:
+    type: int
+    default: 8
+    description: Minimum ABS_Z value considered an active touch.
+
+  x-div:
+    type: int
+    default: 8
+    description: Raw X delta divider before emitting REL_X steps.
+
+  y-div:
+    type: int
+    default: 8
+    description: Raw Y delta divider before emitting REL_Y steps.
+
+  max-rel:
+    type: int
+    default: 40
+    description: Clamp for a single emitted relative step to avoid jumps.
+
+  invert-x:
+    type: boolean
+    description: Invert REL_X output.
+
+  invert-y:
+    type: boolean
+    description: Invert REL_Y output.

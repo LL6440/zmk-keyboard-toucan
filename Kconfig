@@ -1,0 +1,9 @@
+config ZMK_INPUT_PROCESSOR_ABSOLUTE_REL_POINTER
+    bool "Toucan absolute to relative pointer input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_ABSOLUTE_REL_POINTER_ENABLED
+
+config ZMK_INPUT_PROCESSOR_EDGE_SCROLL
+    bool "Toucan edge scroll input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_EDGE_SCROLL_ENABLED

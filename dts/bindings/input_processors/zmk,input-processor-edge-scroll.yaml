@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: MIT
+
+description: Zone-based edge scroll for absolute trackpads
+
+compatible: "zmk,input-processor-edge-scroll"
+
+include: ip_zero_param.yaml
+
+properties:
+  right-zone-pct:
+    type: int
+    default: 18
+    description: Percentage width of the right edge that starts vertical scrolling.
+
+  top-zone-pct:
+    type: int
+    default: 18
+    description: Percentage height of the top edge that starts horizontal scrolling.
+
+  pressure-threshold:
+    type: int
+    default: 8
+    description: Minimum ABS_Z value considered an active touch.
+
+  scroll-div:
+    type: int
+    default: 16
+    description: Raw absolute delta divider before emitting one wheel step.
+
+  x-max:
+    type: int
+    default: 2047
+    description: Maximum X coordinate expected from the trackpad.
+
+  y-max:
+    type: int
+    default: 1535
+    description: Maximum Y coordinate expected from the trackpad.
+
+  invert-vertical:
+    type: boolean
+    description: Invert wheel output for vertical edge scroll.
+
+  invert-horizontal:
+    type: boolean
+    description: Invert hwheel output for horizontal edge scroll.
