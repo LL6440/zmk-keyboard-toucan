@@ -92,29 +92,40 @@ static float angle_diff_deg(float a, float b) {
     return d;
 }
 
-static float point_angle_deg(int32_t dx, int32_t dy) {
-    return atan2f((float)dy, (float)dx) * RAD_TO_DEG;
-}
-
 static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
                                                    int32_t dx, int32_t dy) {
+    float rx = (float)cfg->x_max * 0.5f;
+    float ry = (float)cfg->y_max * 0.5f;
+    float x = (float)dx;
+    float y = (float)dy;
+    float norm = (x * x) / (rx * rx) + (y * y) / (ry * ry);
+    float inner = (float)cfg->inner_ring_pct / 100.0f;
+
     if (!point_in_outer_ring(cfg, dx, dy)) {
+        LOG_DBG("CIRC: start NONE (inner ring) dx=%d dy=%d norm=%.3f threshold=%.3f",
+                dx, dy, (double)norm, (double)(inner * inner));
         return CIRCULAR_SCROLL_MODE_NONE;
     }
 
     float angle = atan2f((float)dy, (float)dx) * RAD_TO_DEG;
     float sector = (float)cfg->sector_half_angle_deg;
 
+    LOG_DBG("CIRC: choose_start dx=%d dy=%d angle=%.1f sector=%.1f norm=%.3f",
+            dx, dy, (double)angle, (double)sector, (double)norm);
+
     if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector ||
         absf_local(angle_diff_deg(angle, 180.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_VERTICAL; /* 3h or 9h (handles x-invert) */
+        LOG_DBG("CIRC: mode=VERTICAL");
+        return CIRCULAR_SCROLL_MODE_VERTICAL;
     }
 
     if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
         absf_local(angle_diff_deg(angle, -90.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_HORIZONTAL; /* 6h */
+        LOG_DBG("CIRC: mode=HORIZONTAL");
+        return CIRCULAR_SCROLL_MODE_HORIZONTAL;
     }
 
+    LOG_DBG("CIRC: mode=NONE (angle not in sector)");
     return CIRCULAR_SCROLL_MODE_NONE;
 }
 
@@ -141,15 +152,12 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
             return ZMK_INPUT_PROC_STOP;
         }
 
-                data->mode = choose_start_mode(cfg, dx, dy);
+        data->mode = choose_start_mode(cfg, dx, dy);
         data->start_ready = true;
         data->have_prev_vec = true;
         data->prev_dx = dx;
         data->prev_dy = dy;
         data->angle_accum_deg = 0.0f;
-
-        LOG_ERR("CIRC start dx=%d dy=%d angle=%d mode=%d",
-                dx, dy, (int)point_angle_deg(dx, dy), data->mode);
 
         if (data->mode == CIRCULAR_SCROLL_MODE_NONE) {
             return ZMK_INPUT_PROC_CONTINUE;
@@ -174,14 +182,14 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     data->prev_dy = dy;
     data->angle_accum_deg += delta;
 
-        if (!data->captured) {
+    if (!data->captured) {
+        LOG_DBG("CIRC: accum=%.1f activation=%.1f", (double)data->angle_accum_deg,
+                (double)cfg->activation_angle_deg);
         if (absf_local(data->angle_accum_deg) < (float)MAX(cfg->activation_angle_deg, 1)) {
             return ZMK_INPUT_PROC_STOP;
         }
-
+        LOG_DBG("CIRC: CAPTURED");
         data->captured = true;
-        LOG_ERR("CIRC captured mode=%d accum=%d",
-                data->mode, (int)data->angle_accum_deg);
     }
 
     int32_t step = 0;
@@ -200,20 +208,20 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
         if (cfg->invert_vertical) {
             step = -step;
         }
+        LOG_DBG("CIRC: WHEEL step=%d", step);
         event->type = INPUT_EV_REL;
         event->code = INPUT_REL_WHEEL;
         event->value = step;
-            LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
     if (cfg->invert_horizontal) {
         step = -step;
     }
+    LOG_DBG("CIRC: HWHEEL step=%d", step);
     event->type = INPUT_EV_REL;
     event->code = INPUT_REL_HWHEEL;
     event->value = step;
-        LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
     return ZMK_INPUT_PROC_CONTINUE;
 }
 
@@ -248,6 +256,8 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
     case INPUT_ABS_Z:
         data->z = event->value;
+        LOG_DBG("CIRC: Z=%d threshold=%d touch_active=%d", data->z, cfg->pressure_threshold,
+                data->touch_active);
 
         if (data->z < cfg->pressure_threshold) {
             circular_scroll_reset(data);
@@ -255,6 +265,7 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
         }
 
         if (!data->touch_active) {
+            LOG_DBG("CIRC: touch START x=%d y=%d", data->x, data->y);
             data->touch_active = true;
             data->start_ready = false;
             data->have_prev_vec = false;
