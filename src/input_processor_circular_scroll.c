@@ -105,8 +105,9 @@ static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_
     float angle = atan2f((float)dy, (float)dx) * RAD_TO_DEG;
     float sector = (float)cfg->sector_half_angle_deg;
 
-    if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_VERTICAL; /* 3h */
+    if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector ||
+        absf_local(angle_diff_deg(angle, 180.0f)) <= sector) {
+        return CIRCULAR_SCROLL_MODE_VERTICAL; /* 3h or 9h (handles x-invert) */
     }
 
     if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
