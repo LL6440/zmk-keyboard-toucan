@@ -46,6 +46,8 @@ struct circular_scroll_data {
     bool start_ready;
     bool have_prev_vec;
     bool captured;
+    bool fresh_x;
+    bool fresh_y;
     enum circular_scroll_mode mode;
 
     int32_t prev_dx;
@@ -59,6 +61,8 @@ static void circular_scroll_reset(struct circular_scroll_data *data) {
     data->start_ready = false;
     data->have_prev_vec = false;
     data->captured = false;
+    data->fresh_x = false;
+    data->fresh_y = false;
     data->mode = CIRCULAR_SCROLL_MODE_NONE;
     data->prev_dx = 0;
     data->prev_dy = 0;
@@ -77,6 +81,17 @@ static bool point_in_outer_ring(const struct circular_scroll_config *cfg, int32_
     return norm >= (inner * inner);
 }
 
+static float angle_diff_deg(float a, float b) {
+    float d = a - b;
+    while (d > 180.0f) {
+        d -= 360.0f;
+    }
+    while (d < -180.0f) {
+        d += 360.0f;
+    }
+    return d;
+}
+
 static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
                                                    int32_t dx, int32_t dy) {
     if (!point_in_outer_ring(cfg, dx, dy)) {
@@ -86,11 +101,12 @@ static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_
     float angle = atan2f((float)dy, (float)dx) * RAD_TO_DEG;
     float sector = (float)cfg->sector_half_angle_deg;
 
-    if (absf_local(angle) <= sector) {
+    if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector) {
         return CIRCULAR_SCROLL_MODE_VERTICAL; /* 3h */
     }
 
-    if (absf_local(angle - 90.0f) <= sector) {
+    if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
+        absf_local(angle_diff_deg(angle, -90.0f)) <= sector) {
         return CIRCULAR_SCROLL_MODE_HORIZONTAL; /* 6h */
     }
 
@@ -116,6 +132,10 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     }
 
     if (!data->start_ready) {
+        if (!data->fresh_x || !data->fresh_y) {
+            return ZMK_INPUT_PROC_STOP;
+        }
+
         data->mode = choose_start_mode(cfg, dx, dy);
         data->start_ready = true;
         data->have_prev_vec = true;
@@ -202,10 +222,16 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
     switch (event->code) {
     case INPUT_ABS_X:
         data->x = event->value;
+        if (data->touch_active && !data->start_ready) {
+            data->fresh_x = true;
+        }
         return circular_scroll_handle_motion(dev, event, cfg, data);
 
     case INPUT_ABS_Y:
         data->y = event->value;
+        if (data->touch_active && !data->start_ready) {
+            data->fresh_y = true;
+        }
         return circular_scroll_handle_motion(dev, event, cfg, data);
 
     case INPUT_ABS_Z:
@@ -221,6 +247,8 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
             data->start_ready = false;
             data->have_prev_vec = false;
             data->captured = false;
+            data->fresh_x = false;
+            data->fresh_y = false;
             data->mode = CIRCULAR_SCROLL_MODE_NONE;
             data->angle_accum_deg = 0.0f;
         }
