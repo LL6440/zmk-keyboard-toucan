@@ -116,10 +116,10 @@
         pressure-threshold = <8>;
         x-max = <2047>;
         y-max = <1535>;
-        inner-ring-pct = <65>;
-        sector-half-angle-deg = <40>;
-        activation-angle-deg = <10>;
-        scroll-angle-deg = <12>;
+        inner-ring-pct = <45>;
+        sector-half-angle-deg = <75>;
+        activation-angle-deg = <3>;
+        scroll-angle-deg = <5>;
         invert-horizontal;
         status = "okay";
     };

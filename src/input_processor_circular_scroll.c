@@ -92,6 +92,10 @@ static float angle_diff_deg(float a, float b) {
     return d;
 }
 
+static float point_angle_deg(int32_t dx, int32_t dy) {
+    return atan2f((float)dy, (float)dx) * RAD_TO_DEG;
+}
+
 static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
                                                    int32_t dx, int32_t dy) {
     if (!point_in_outer_ring(cfg, dx, dy)) {
@@ -136,12 +140,15 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
             return ZMK_INPUT_PROC_STOP;
         }
 
-        data->mode = choose_start_mode(cfg, dx, dy);
+                data->mode = choose_start_mode(cfg, dx, dy);
         data->start_ready = true;
         data->have_prev_vec = true;
         data->prev_dx = dx;
         data->prev_dy = dy;
         data->angle_accum_deg = 0.0f;
+
+        LOG_ERR("CIRC start dx=%d dy=%d angle=%d mode=%d",
+                dx, dy, (int)point_angle_deg(dx, dy), data->mode);
 
         if (data->mode == CIRCULAR_SCROLL_MODE_NONE) {
             return ZMK_INPUT_PROC_CONTINUE;
@@ -166,12 +173,14 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     data->prev_dy = dy;
     data->angle_accum_deg += delta;
 
-    if (!data->captured) {
+        if (!data->captured) {
         if (absf_local(data->angle_accum_deg) < (float)MAX(cfg->activation_angle_deg, 1)) {
             return ZMK_INPUT_PROC_STOP;
         }
 
         data->captured = true;
+        LOG_ERR("CIRC captured mode=%d accum=%d",
+                data->mode, (int)data->angle_accum_deg);
     }
 
     int32_t step = 0;
@@ -193,6 +202,7 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
         event->type = INPUT_EV_REL;
         event->code = INPUT_REL_WHEEL;
         event->value = step;
+            LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -202,6 +212,7 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     event->type = INPUT_EV_REL;
     event->code = INPUT_REL_HWHEEL;
     event->value = step;
+        LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
     return ZMK_INPUT_PROC_CONTINUE;
 }
 
@@ -216,6 +227,7 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
     struct circular_scroll_data *data = dev->data;
 
     if (event->type != INPUT_EV_ABS) {
+            LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -239,6 +251,7 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
         if (data->z < cfg->pressure_threshold) {
             circular_scroll_reset(data);
+                LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
@@ -254,12 +267,14 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
         }
 
         if (data->mode == CIRCULAR_SCROLL_MODE_NONE) {
+                LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
         return ZMK_INPUT_PROC_STOP;
 
     default:
+        LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 }
