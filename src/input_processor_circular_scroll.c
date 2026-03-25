@@ -227,7 +227,6 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
     struct circular_scroll_data *data = dev->data;
 
     if (event->type != INPUT_EV_ABS) {
-            LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -251,7 +250,6 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
         if (data->z < cfg->pressure_threshold) {
             circular_scroll_reset(data);
-                LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
@@ -267,14 +265,12 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
         }
 
         if (data->mode == CIRCULAR_SCROLL_MODE_NONE) {
-                LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
         return ZMK_INPUT_PROC_STOP;
 
     default:
-        LOG_ERR("CIRC emit mode=%d step=%d", data->mode, step);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 }
