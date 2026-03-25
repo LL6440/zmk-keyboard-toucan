@@ -72,6 +72,7 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
     switch (event->code) {
     case INPUT_ABS_X: {
         data->x = event->value;
+        LOG_INF("PAD X=%d Z=%d", data->x, data->z);
 
         if (!data->touch_active) {
             return ZMK_INPUT_PROC_STOP;
@@ -107,6 +108,7 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
 
     case INPUT_ABS_Y: {
         data->y = event->value;
+        LOG_INF("PAD Y=%d Z=%d", data->y, data->z);
 
         if (!data->touch_active) {
             return ZMK_INPUT_PROC_STOP;
@@ -142,6 +144,7 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
 
     case INPUT_ABS_Z:
         data->z = event->value;
+        LOG_INF("PAD Z=%d X=%d Y=%d", data->z, data->x, data->y);
 
         if (data->z < cfg->pressure_threshold) {
             abs_rel_pointer_reset(data);
