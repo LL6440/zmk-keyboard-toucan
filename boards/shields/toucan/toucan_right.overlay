@@ -64,6 +64,7 @@
         dr-gpios = <&gpio0 2 (GPIO_ACTIVE_HIGH)>;
         sensitivity = "2x";
         x-invert;
+        y-invert;
         absolute-mode;
         absolute-mode-scale-to-width = <2048>;
         absolute-mode-scale-to-height = <1536>;
