@@ -32,6 +32,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #endif
 #define RAD_TO_DEG (180.0f / (float)M_PI)
 
+#define IABS(x) ((x) < 0 ? -(x) : (x))
+
 /* ── tuneable constants ─────────────────────────────────────────────────── */
 
 /* Minimum per-report speed (sum |dx|+|dy|) to participate in detection.   */
@@ -140,7 +142,7 @@ static int32_t process_vector(struct circular_scroll_data *d,
     int32_t dx = d->curr_dx;
     int32_t dy = d->curr_dy;
 
-    int speed = ABS(dx) + ABS(dy);
+    int speed = IABS(dx) + IABS(dy);
 
     if (!d->have_prev || speed < MIN_SPEED) {
         /* First sample, or finger barely moved — just store, don't detect. */
@@ -166,12 +168,12 @@ static int32_t process_vector(struct circular_scroll_data *d,
     d->prev_dx = dx;
     d->prev_dy = dy;
 
-    bool is_circular = (ABS((int)(norm_cross * 1000)) > (int)(CIRC_SIN_THRESHOLD * 1000));
+    bool is_circular = (IABS((int)(norm_cross * 1000)) > (int)(CIRC_SIN_THRESHOLD * 1000));
 
     if (!d->scroll_mode) {
         /* Accumulate axis-selection data */
-        d->abs_x_sum   += ABS(dx);
-        d->abs_y_sum   += ABS(dy);
+        d->abs_x_sum   += IABS(dx);
+        d->abs_y_sum   += IABS(dy);
         d->axis_samples++;
 
         if (is_circular) {
@@ -221,7 +223,7 @@ static int32_t process_vector(struct circular_scroll_data *d,
         ? ((cfg->scroll_angle_deg > 0) ? cfg->scroll_angle_deg : DEFAULT_SCROLL_DEG)
         : ((cfg->scroll_angle_deg > 0) ? cfg->scroll_angle_deg : DEFAULT_SCROLL_DEG);
 
-    if (ABS((int)d->angle_accum) < scroll_deg) {
+    if (IABS((int)d->angle_accum) < scroll_deg) {
         return 0;
     }
 
