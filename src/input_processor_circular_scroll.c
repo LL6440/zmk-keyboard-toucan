@@ -94,39 +94,13 @@ static float angle_diff_deg(float a, float b) {
 
 static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
                                                    int32_t dx, int32_t dy) {
-    float rx = (float)cfg->x_max * 0.5f;
-    float ry = (float)cfg->y_max * 0.5f;
-    float x = (float)dx;
-    float y = (float)dy;
-    float norm = (x * x) / (rx * rx) + (y * y) / (ry * ry);
-    float inner = (float)cfg->inner_ring_pct / 100.0f;
-
+    /* FORCE TEST: always VERTICAL if in outer ring, HORIZONTAL otherwise */
     if (!point_in_outer_ring(cfg, dx, dy)) {
-        LOG_ERR("CIRC: start NONE (inner ring) dx=%d dy=%d norm=%.3f threshold=%.3f",
-                dx, dy, (double)norm, (double)(inner * inner));
         return CIRCULAR_SCROLL_MODE_NONE;
     }
+    /* Force VERTICAL to test scroll pipeline works at all */
+    return CIRCULAR_SCROLL_MODE_VERTICAL;
 
-    float angle = atan2f((float)dy, (float)dx) * RAD_TO_DEG;
-    float sector = (float)cfg->sector_half_angle_deg;
-
-    LOG_ERR("CIRC: choose_start dx=%d dy=%d angle=%.1f sector=%.1f norm=%.3f",
-            dx, dy, (double)angle, (double)sector, (double)norm);
-
-    if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector ||
-        absf_local(angle_diff_deg(angle, 180.0f)) <= sector) {
-        LOG_ERR("CIRC: mode=VERTICAL");
-        return CIRCULAR_SCROLL_MODE_VERTICAL;
-    }
-
-    if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
-        absf_local(angle_diff_deg(angle, -90.0f)) <= sector) {
-        LOG_ERR("CIRC: mode=HORIZONTAL");
-        return CIRCULAR_SCROLL_MODE_HORIZONTAL;
-    }
-
-    LOG_ERR("CIRC: mode=NONE (angle not in sector)");
-    return CIRCULAR_SCROLL_MODE_NONE;
 }
 
 static float delta_angle_deg(int32_t prev_dx, int32_t prev_dy, int32_t dx, int32_t dy) {
@@ -186,7 +160,6 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
         if (absf_local(data->angle_accum_deg) < (float)MAX(cfg->activation_angle_deg, 1)) {
             return ZMK_INPUT_PROC_STOP;
         }
-        LOG_ERR("CIRC: CAPTURED");
         data->captured = true;
     }
 
@@ -206,7 +179,6 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
         if (cfg->invert_vertical) {
             step = -step;
         }
-        LOG_ERR("CIRC: WHEEL step=%d", step);
         event->type = INPUT_EV_REL;
         event->code = INPUT_REL_WHEEL;
         event->value = step;
@@ -216,7 +188,6 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     if (cfg->invert_horizontal) {
         step = -step;
     }
-    LOG_ERR("CIRC: HWHEEL step=%d", step);
     event->type = INPUT_EV_REL;
     event->code = INPUT_REL_HWHEEL;
     event->value = step;
@@ -254,8 +225,6 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
     case INPUT_ABS_Z:
         data->z = event->value;
-        LOG_ERR("CIRC: Z=%d threshold=%d touch_active=%d", data->z, cfg->pressure_threshold,
-                data->touch_active);
 
         if (data->z < cfg->pressure_threshold) {
             circular_scroll_reset(data);
@@ -263,7 +232,6 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
         }
 
         if (!data->touch_active) {
-            LOG_ERR("CIRC: touch START x=%d y=%d", data->x, data->y);
             data->touch_active = true;
             data->start_ready = false;
             data->have_prev_vec = false;
