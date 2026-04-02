@@ -82,8 +82,9 @@ struct circular_scroll_data {
     int32_t curr_dx;
     bool    have_x;
 
-    /* Scroll state */
-    bool          scroll_mode;
+    /* Touch + scroll state */
+    bool           touch_active;
+    bool           scroll_mode;
     enum circ_axis scroll_axis;
     float          angle_accum;
 
@@ -104,6 +105,7 @@ static void circ_reset(struct circular_scroll_data *d) {
     d->filled      = 0;
     d->curr_dx     = 0;
     d->have_x      = false;
+    d->touch_active = false;
     d->scroll_mode = false;
     d->scroll_axis = AXIS_UNKNOWN;
     d->angle_accum = 0.0f;
@@ -196,8 +198,8 @@ static int32_t process_vector(struct circular_scroll_data *d,
 
     /* ── Scroll mode ── */
     if (!is_circular) {
+        /* Keep the current mode latched until finger lift. */
         d->exit_count++;
-        if (d->exit_count >= CIRC_EXIT) { circ_reset(d); }
         return 0;
     }
     d->exit_count = 0;
@@ -228,6 +230,25 @@ static int circular_scroll_handle_event(const struct device *dev,
     const struct circular_scroll_config *cfg = dev->config;
     struct circular_scroll_data         *data = dev->data;
 
+    if (event->type == INPUT_EV_ABS) {
+        if (event->code == INPUT_ABS_Z) {
+            if (event->value < cfg->pressure_threshold) {
+                circ_reset(data);
+            } else if (!data->touch_active) {
+                data->touch_active = true;
+                data->curr_dx = 0;
+                data->have_x = false;
+                data->angle_accum = 0.0f;
+                data->enter_count = 0;
+                data->exit_count = 0;
+                data->circ_sign = 0.0f;
+                data->abs_x_sum = 0.0f;
+                data->abs_y_sum = 0.0f;
+            }
+        }
+        return ZMK_INPUT_PROC_CONTINUE;
+    }
+
     if (event->type != INPUT_EV_REL) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
@@ -235,7 +256,7 @@ static int circular_scroll_handle_event(const struct device *dev,
     if (event->code == INPUT_REL_X) {
         data->curr_dx = event->value;
         data->have_x  = true;
-        /* In scroll mode, block cursor X movement. */
+        /* Once scroll mode is entered, keep the cursor frozen until lift. */
         return data->scroll_mode ? ZMK_INPUT_PROC_STOP : ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -247,8 +268,13 @@ static int circular_scroll_handle_event(const struct device *dev,
 
         int32_t ticks = process_vector(data, cfg, dx, dy);
 
-        if (!data->scroll_mode || ticks == 0) {
+        if (!data->scroll_mode) {
             return ZMK_INPUT_PROC_CONTINUE;
+        }
+
+        if (ticks == 0) {
+            /* Keep swallowing pointer motion while finger remains down. */
+            return ZMK_INPUT_PROC_STOP;
         }
 
         /* Convert the REL_Y event into a scroll event. */
