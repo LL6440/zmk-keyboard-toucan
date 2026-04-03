@@ -289,15 +289,7 @@ static int circular_scroll_handle_event(const struct device *dev,
 
         int32_t ticks = process_vector(data, cfg, dx, dy);
 
-        /* While scroll mode is locked, never let REL_Y fall through as pointer
-         * motion.  If no wheel tick is ready yet, swallow the event and keep
-         * waiting for more arc accumulation.
-         */
-        if (data->state == STATE_SCROLL && ticks == 0) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        if (data->state != STATE_SCROLL) {
+        if (data->state != STATE_SCROLL || ticks == 0) {
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
