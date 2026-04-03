@@ -1,17 +1,14 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * Circular scroll with gesture lock.
+ * Circular scroll input processor — REL-event based, sliding-window detection.
  *
- * Behavior:
- *  - touch must start near 3h/9h (vertical candidate) or 6h/12h (horizontal candidate)
- *  - first meaningful motion decides:
- *      tangential motion => lock scroll on candidate axis
- *      radial motion     => lock normal pointer
- *  - once locked, mode never changes until finger lift
+ * State machine:
+ *   IDLE  → (circular motion detected) → SCROLL  → (finger lift) → IDLE
+ *   IDLE  → (non-circular motion)      → CURSOR   → (finger lift) → IDLE
  *
- * Scroll emission intentionally keeps the proven vector-delta accumulation path
- * from the earlier working version, because it reacted correctly on hardware.
+ * Once an axis/mode is chosen it is LOCKED until the finger is lifted.
+ * Finger lift is detected by N consecutive frames all below LIFT_SPEED.
  */
 
 #define DT_DRV_COMPAT zmk_input_processor_circular_scroll
@@ -28,19 +25,43 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
 #define RAD_TO_DEG (180.0f / (float)M_PI)
-#define DECISION_SPEED 10
-#define DECISION_MARGIN 4.0f
+#define IABS(x)    ((x) < 0 ? -(x) : (x))
 
-enum circular_scroll_mode {
-    CIRCULAR_SCROLL_MODE_NONE = 0,
-    CIRCULAR_SCROLL_MODE_POINTER,
-    CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL,
-    CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL,
-    CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL,
-    CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL,
+/* ── tuneable constants ─────────────────────────────────────────────────── */
+
+#define HIST_SIZE           16
+#define COMPARE_OFFSET       8   /* samples back to compare against          */
+
+/* Min speed to participate in detection (avoids noise near lift).          */
+#define MIN_SPEED_DETECT     6
+/* Speed below which a frame counts toward "finger lift".                   */
+#define LIFT_SPEED           3
+/* Consecutive frames at LIFT_SPEED to declare finger lifted & reset.       */
+#define LIFT_FRAMES          6
+
+/* Min consecutive circular samples to enter scroll mode.                   */
+#define CIRC_ENTER           3
+/* Min consecutive non-circular samples to commit to CURSOR mode            *
+ * (only applies during the IDLE detection phase, before mode is locked).   */
+#define CURSOR_ENTER         5
+
+/* |sin(angle)| threshold for circular detection.                           */
+#define CIRC_SIN_THRESHOLD   0.22f
+
+#define DEFAULT_SCROLL_DEG   12
+
+/* ── state machine ───────────────────────────────────────────────────────── */
+
+enum circ_state {
+    STATE_IDLE = 0,   /* waiting to determine mode                          */
+    STATE_SCROLL,     /* circular scroll mode — locked until lift           */
+    STATE_CURSOR,     /* plain cursor mode   — locked until lift            */
 };
+
+enum circ_axis { AXIS_VERTICAL = 0, AXIS_HORIZONTAL };
+
+/* ── config / data ───────────────────────────────────────────────────────── */
 
 struct circular_scroll_config {
     uint16_t pressure_threshold;
@@ -55,370 +76,257 @@ struct circular_scroll_config {
 };
 
 struct circular_scroll_data {
-    int32_t x;
-    int32_t y;
-    int32_t z;
+    /* Velocity ring-buffer */
+    int32_t vx[HIST_SIZE];
+    int32_t vy[HIST_SIZE];
+    int     head;
+    int     filled;
 
-    bool touch_active;
-    bool start_ready;
-    bool have_prev_vec;
-    bool captured;
-    bool fresh_x;
-    bool fresh_y;
-    enum circular_scroll_mode mode;
+    /* Current-report REL_X accumulator */
+    int32_t curr_dx;
+    bool    have_x;
 
-    int32_t start_x;
-    int32_t start_y;
-    float start_radial_x;
-    float start_radial_y;
-    float start_tangent_x;
-    float start_tangent_y;
+    /* State machine */
+    enum circ_state state;
+    enum circ_axis  scroll_axis;
 
-    int32_t prev_dx;
-    int32_t prev_dy;
-    float angle_accum_deg;
+    /* Scroll angle accumulator */
+    float angle_accum;
+
+    /* Detection counters (IDLE phase only) */
+    int   circ_count;    /* consecutive circular samples                    */
+    int   cursor_count;  /* consecutive non-circular samples                */
+    float circ_sign;     /* +1 or -1 — rotation direction                  */
+
+    /* Axis-selection accumulators (IDLE phase only) */
+    float abs_x_sum;
+    float abs_y_sum;
+
+    /* Finger-lift detector */
+    int   lift_count;    /* consecutive slow frames                         */
 };
 
-static void circular_scroll_reset(struct circular_scroll_data *data) {
-    data->z = 0;
-    data->touch_active = false;
-    data->start_ready = false;
-    data->have_prev_vec = false;
-    data->captured = false;
-    data->fresh_x = false;
-    data->fresh_y = false;
-    data->mode = CIRCULAR_SCROLL_MODE_NONE;
-    data->start_x = 0;
-    data->start_y = 0;
-    data->start_radial_x = 0.0f;
-    data->start_radial_y = 0.0f;
-    data->start_tangent_x = 0.0f;
-    data->start_tangent_y = 0.0f;
-    data->prev_dx = 0;
-    data->prev_dy = 0;
-    data->angle_accum_deg = 0.0f;
+/* ── helpers ─────────────────────────────────────────────────────────────── */
+
+static void full_reset(struct circular_scroll_data *d) {
+    d->head         = 0;
+    d->filled       = 0;
+    d->curr_dx      = 0;
+    d->have_x       = false;
+    d->state        = STATE_IDLE;
+    d->angle_accum  = 0.0f;
+    d->circ_count   = 0;
+    d->cursor_count = 0;
+    d->circ_sign    = 0.0f;
+    d->abs_x_sum    = 0.0f;
+    d->abs_y_sum    = 0.0f;
+    d->lift_count   = 0;
 }
 
-static inline float absf_local(float v) { return v < 0 ? -v : v; }
-
-static bool point_in_outer_ring(const struct circular_scroll_config *cfg, int32_t dx, int32_t dy) {
-    float rx = (float)cfg->x_max * 0.5f;
-    float ry = (float)cfg->y_max * 0.5f;
-    float x = (float)dx;
-    float y = (float)dy;
-    float norm = (x * x) / (rx * rx) + (y * y) / (ry * ry);
-    float inner = (float)cfg->inner_ring_pct / 100.0f;
-    return norm >= (inner * inner);
+static void push_vel(struct circular_scroll_data *d, int32_t dx, int32_t dy) {
+    d->vx[d->head] = dx;
+    d->vy[d->head] = dy;
+    d->head = (d->head + 1) % HIST_SIZE;
+    if (d->filled < HIST_SIZE) d->filled++;
 }
 
-static float angle_diff_deg(float a, float b) {
-    float d = a - b;
-    while (d > 180.0f) {
-        d -= 360.0f;
-    }
-    while (d < -180.0f) {
-        d += 360.0f;
-    }
-    return d;
+static void get_past(const struct circular_scroll_data *d, int offset,
+                     int32_t *ox, int32_t *oy) {
+    int idx = (d->head - 1 - offset + HIST_SIZE * 2) % HIST_SIZE;
+    *ox = d->vx[idx];
+    *oy = d->vy[idx];
 }
 
-static float point_angle_deg(int32_t dx, int32_t dy) {
-    return atan2f((float)dy, (float)dx) * RAD_TO_DEG;
-}
+/* ── per-report processing ───────────────────────────────────────────────── */
 
-static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
-                                                   int32_t dx, int32_t dy) {
-    if (!point_in_outer_ring(cfg, dx, dy)) {
-        return CIRCULAR_SCROLL_MODE_POINTER;
-    }
+/*
+ * Returns the number of scroll ticks to emit (0 = none).
+ * Also updates d->state.
+ */
+static int32_t process_vector(struct circular_scroll_data *d,
+                              const struct circular_scroll_config *cfg,
+                              int32_t dx, int32_t dy)
+{
+    int speed = IABS(dx) + IABS(dy);
 
-    float angle = atan2f((float)dy, (float)dx) * RAD_TO_DEG;
-    float sector = (float)cfg->sector_half_angle_deg;
-
-    if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector ||
-        absf_local(angle_diff_deg(angle, 180.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL;
-    }
-
-    if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
-        absf_local(angle_diff_deg(angle, -90.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL;
-    }
-
-    return CIRCULAR_SCROLL_MODE_POINTER;
-}
-
-static float delta_angle_deg(int32_t prev_dx, int32_t prev_dy, int32_t dx, int32_t dy) {
-    float cross = (float)prev_dx * (float)dy - (float)prev_dy * (float)dx;
-    float dot = (float)prev_dx * (float)dx + (float)prev_dy * (float)dy;
-    return atan2f(cross, dot) * RAD_TO_DEG;
-}
-
-static bool maybe_lock_candidate(struct circular_scroll_data *data, int32_t dx, int32_t dy) {
-    if (data->mode != CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL &&
-        data->mode != CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-        return true;
-    }
-
-    float total_dx = (float)(data->x - data->start_x);
-    float total_dy = (float)(data->y - data->start_y);
-    float abs_dx = absf_local(total_dx);
-    float abs_dy = absf_local(total_dy);
-    int total_speed = (int)(abs_dx + abs_dy);
-    if (total_speed < DECISION_SPEED) {
-        return false;
-    }
-
-    if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL) {
-        /*
-         * Start near 3h/9h:
-         *   - first mostly vertical motion => circular vertical scroll
-         *   - first mostly horizontal motion => normal pointer
-         */
-        if ((abs_dy - abs_dx) >= DECISION_MARGIN) {
-            data->mode = CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL;
-            data->captured = false;
-            data->angle_accum_deg = 0.0f;
-            data->prev_dx = dx;
-            data->prev_dy = dy;
-            data->have_prev_vec = true;
-            return false;
+    /* ── Finger-lift detection (runs in all states) ── */
+    if (speed <= LIFT_SPEED) {
+        d->lift_count++;
+        if (d->lift_count >= LIFT_FRAMES) {
+            full_reset(d);
+            /* Don't push this slow sample; start fresh next time. */
+            return 0;
         }
+    } else {
+        d->lift_count = 0;
+    }
 
-        if ((abs_dx - abs_dy) >= DECISION_MARGIN) {
-            data->mode = CIRCULAR_SCROLL_MODE_POINTER;
-            return true;
+    push_vel(d, dx, dy);
+
+    /* ── Locked states: no mode change allowed ── */
+
+    if (d->state == STATE_CURSOR) {
+        /* Plain cursor mode — just pass through, no scroll. */
+        return 0;
+    }
+
+    if (d->state == STATE_SCROLL) {
+        /* Scroll mode locked. Compute angle and emit ticks. */
+        if (d->filled <= COMPARE_OFFSET || speed < MIN_SPEED_DETECT) {
+            return 0;
         }
+        int32_t px, py;
+        get_past(d, COMPARE_OFFSET, &px, &py);
 
-        return false;
+        float cross    = (float)px * dy - (float)py * dx;
+        float dot      = (float)px * dx + (float)py * dy;
+        float swept    = atan2f(cross, dot + 1e-6f) * RAD_TO_DEG;
+
+        d->angle_accum += swept;
+
+        int32_t scroll_deg = (cfg->scroll_angle_deg > 0)
+                             ? cfg->scroll_angle_deg : DEFAULT_SCROLL_DEG;
+
+        if (IABS((int)d->angle_accum) < scroll_deg) { return 0; }
+
+        int32_t ticks   = (int32_t)(d->angle_accum / (float)scroll_deg);
+        d->angle_accum -= (float)ticks * (float)scroll_deg;
+        return ticks;
     }
 
-    /*
-     * Start near 6h/12h:
-     *   - first mostly horizontal motion => circular horizontal scroll
-     *   - first mostly vertical motion   => normal pointer
-     */
-    if ((abs_dx - abs_dy) >= DECISION_MARGIN) {
-        data->mode = CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL;
-        data->captured = false;
-        data->angle_accum_deg = 0.0f;
-        data->prev_dx = dx;
-        data->prev_dy = dy;
-        data->have_prev_vec = true;
-        return false;
+    /* ── STATE_IDLE: determine mode ── */
+
+    d->abs_x_sum += IABS(dx);
+    d->abs_y_sum += IABS(dy);
+
+    if (d->filled <= COMPARE_OFFSET || speed < MIN_SPEED_DETECT) {
+        return 0;
     }
 
-    if ((abs_dy - abs_dx) >= DECISION_MARGIN) {
-        data->mode = CIRCULAR_SCROLL_MODE_POINTER;
-        return true;
-    }
+    int32_t px, py;
+    get_past(d, COMPARE_OFFSET, &px, &py);
 
-    return false;
-}
+    float m1 = sqrtf((float)px*px + (float)py*py);
+    float m2 = sqrtf((float)dx*dx + (float)dy*dy);
+    if (m1 < 1.0f || m2 < 1.0f) { return 0; }
 
-static int circular_scroll_handle_motion(const struct device *dev, struct input_event *event,
-                                         const struct circular_scroll_config *cfg,
-                                         struct circular_scroll_data *data) {
-    int32_t center_x = (int32_t)cfg->x_max / 2;
-    int32_t center_y = (int32_t)cfg->y_max / 2;
-    int32_t dx = data->x - center_x;
-    int32_t dy = data->y - center_y;
+    float cross      = (float)px * dy - (float)py * dx;
+    float norm_cross = cross / (m1 * m2);
 
-    if (!data->touch_active) {
-        return ZMK_INPUT_PROC_CONTINUE;
-    }
+    bool is_circular = (IABS((int)(norm_cross * 1000)) >
+                        (int)(CIRC_SIN_THRESHOLD * 1000));
 
-    if (!data->start_ready) {
-        if (!data->fresh_x || !data->fresh_y) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        data->mode = choose_start_mode(cfg, dx, dy);
-        data->start_ready = true;
-        data->start_x = data->x;
-        data->start_y = data->y;
-        data->have_prev_vec = true;
-        data->prev_dx = dx;
-        data->prev_dy = dy;
-        data->angle_accum_deg = 0.0f;
-        data->captured = false;
-
-        float len = sqrtf((float)dx * (float)dx + (float)dy * (float)dy);
-        if (len > 0.0f) {
-            data->start_radial_x = (float)dx / len;
-            data->start_radial_y = (float)dy / len;
-            data->start_tangent_x = -data->start_radial_y;
-            data->start_tangent_y = data->start_radial_x;
+    if (is_circular) {
+        float new_sign = (norm_cross > 0.0f) ? 1.0f : -1.0f;
+        if (d->circ_count == 0 || d->circ_sign == new_sign) {
+            d->circ_count++;
+            d->circ_sign = new_sign;
         } else {
-            data->start_radial_x = 0.0f;
-            data->start_radial_y = 0.0f;
-            data->start_tangent_x = 0.0f;
-            data->start_tangent_y = 0.0f;
+            /* Direction flipped — reset circular counter */
+            d->circ_count = 1;
+            d->circ_sign  = new_sign;
         }
+        d->cursor_count = 0;
 
-        if (data->mode == CIRCULAR_SCROLL_MODE_POINTER) {
-            return ZMK_INPUT_PROC_CONTINUE;
+        if (d->circ_count >= CIRC_ENTER) {
+            d->state       = STATE_SCROLL;
+            d->scroll_axis = (d->abs_y_sum >= d->abs_x_sum)
+                             ? AXIS_VERTICAL : AXIS_HORIZONTAL;
+            d->angle_accum = 0.0f;
         }
+    } else {
+        d->cursor_count++;
+        d->circ_count = 0;
+        d->circ_sign  = 0.0f;
 
-        return ZMK_INPUT_PROC_STOP;
-    }
-
-    if (data->mode == CIRCULAR_SCROLL_MODE_POINTER || data->mode == CIRCULAR_SCROLL_MODE_NONE) {
-        return ZMK_INPUT_PROC_CONTINUE;
-    }
-
-    if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL ||
-        data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-        if (maybe_lock_candidate(data, dx, dy)) {
-            return ZMK_INPUT_PROC_CONTINUE;
+        if (d->cursor_count >= CURSOR_ENTER) {
+            d->state = STATE_CURSOR;
         }
-
-        if (data->mode == CIRCULAR_SCROLL_MODE_POINTER) {
-            return ZMK_INPUT_PROC_CONTINUE;
-        }
-
-        if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL ||
-            data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        return ZMK_INPUT_PROC_STOP;
     }
 
-    if (!data->have_prev_vec) {
-        data->have_prev_vec = true;
-        data->prev_dx = dx;
-        data->prev_dy = dy;
-        return ZMK_INPUT_PROC_STOP;
-    }
-
-    float delta = delta_angle_deg(data->prev_dx, data->prev_dy, dx, dy);
-    data->prev_dx = dx;
-    data->prev_dy = dy;
-    data->angle_accum_deg += delta;
-
-    if (!data->captured) {
-        if (absf_local(data->angle_accum_deg) < (float)MAX(cfg->activation_angle_deg, 1)) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-        data->captured = true;
-    }
-
-    int32_t step = 0;
-    int32_t threshold = MAX(cfg->scroll_angle_deg, 1);
-
-    if (absf_local(data->angle_accum_deg) >= (float)threshold) {
-        step = (int32_t)(data->angle_accum_deg / (float)threshold);
-        data->angle_accum_deg -= (float)step * (float)threshold;
-    }
-
-    if (step == 0) {
-        return ZMK_INPUT_PROC_STOP;
-    }
-
-    event->type = INPUT_EV_REL;
-    if (data->mode == CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL) {
-        if (cfg->invert_vertical) {
-            step = -step;
-        }
-        event->code = INPUT_REL_WHEEL;
-        event->value = step;
-        return ZMK_INPUT_PROC_CONTINUE;
-    }
-
-    if (cfg->invert_horizontal) {
-        step = -step;
-    }
-    event->code = INPUT_REL_HWHEEL;
-    event->value = step;
-    return ZMK_INPUT_PROC_CONTINUE;
+    return 0;
 }
 
-static int circular_scroll_handle_event(const struct device *dev, struct input_event *event,
+/* ── main event handler ──────────────────────────────────────────────────── */
+
+static int circular_scroll_handle_event(const struct device *dev,
+                                        struct input_event *event,
                                         uint32_t param1, uint32_t param2,
-                                        struct zmk_input_processor_state *state) {
+                                        struct zmk_input_processor_state *state)
+{
     ARG_UNUSED(param1);
     ARG_UNUSED(param2);
     ARG_UNUSED(state);
 
-    const struct circular_scroll_config *cfg = dev->config;
-    struct circular_scroll_data *data = dev->data;
+    const struct circular_scroll_config *cfg  = dev->config;
+    struct circular_scroll_data         *data = dev->data;
 
-    if (event->type != INPUT_EV_ABS) {
+    if (event->type != INPUT_EV_REL) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    switch (event->code) {
-    case INPUT_ABS_X:
-        data->x = event->value;
-        if (data->touch_active && !data->start_ready) {
-            data->fresh_x = true;
-        }
-        return circular_scroll_handle_motion(dev, event, cfg, data);
+    if (event->code == INPUT_REL_X) {
+        data->curr_dx = event->value;
+        data->have_x  = true;
+        /* In scroll mode, suppress X cursor movement. */
+        return (data->state == STATE_SCROLL)
+               ? ZMK_INPUT_PROC_STOP : ZMK_INPUT_PROC_CONTINUE;
+    }
 
-    case INPUT_ABS_Y:
-        data->y = event->value;
-        if (data->touch_active && !data->start_ready) {
-            data->fresh_y = true;
-        }
-        return circular_scroll_handle_motion(dev, event, cfg, data);
+    if (event->code == INPUT_REL_Y) {
+        int32_t dx = data->have_x ? data->curr_dx : 0;
+        int32_t dy = event->value;
+        data->have_x  = false;
+        data->curr_dx = 0;
 
-    case INPUT_ABS_Z:
-        data->z = event->value;
+        int32_t ticks = process_vector(data, cfg, dx, dy);
 
-        if (data->z < cfg->pressure_threshold) {
-            circular_scroll_reset(data);
+        if (data->state != STATE_SCROLL || ticks == 0) {
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
-        if (!data->touch_active) {
-            data->touch_active = true;
-            data->start_ready = false;
-            data->have_prev_vec = false;
-            data->captured = false;
-            data->fresh_x = false;
-            data->fresh_y = false;
-            data->mode = CIRCULAR_SCROLL_MODE_NONE;
-            data->angle_accum_deg = 0.0f;
+        if (data->scroll_axis == AXIS_VERTICAL) {
+            if (cfg->invert_vertical) { ticks = -ticks; }
+            event->code  = INPUT_REL_WHEEL;
+            event->value = ticks;
+        } else {
+            if (cfg->invert_horizontal) { ticks = -ticks; }
+            event->code  = INPUT_REL_HWHEEL;
+            event->value = ticks;
         }
-
-        if (data->mode == CIRCULAR_SCROLL_MODE_POINTER ||
-            data->mode == CIRCULAR_SCROLL_MODE_NONE) {
-            return ZMK_INPUT_PROC_CONTINUE;
-        }
-
-        return ZMK_INPUT_PROC_STOP;
-
-    default:
         return ZMK_INPUT_PROC_CONTINUE;
     }
+
+    return ZMK_INPUT_PROC_CONTINUE;
 }
 
+/* ── driver boilerplate ──────────────────────────────────────────────────── */
+
 static int circular_scroll_init(const struct device *dev) {
-    struct circular_scroll_data *data = dev->data;
-    circular_scroll_reset(data);
+    full_reset(dev->data);
     return 0;
 }
 
-static const struct zmk_input_processor_driver_api circular_scroll_driver_api = {
+static const struct zmk_input_processor_driver_api circular_scroll_api = {
     .handle_event = circular_scroll_handle_event,
 };
 
-#define CIRCULAR_SCROLL_INST(n)                                                              \
-    static struct circular_scroll_data circular_scroll_data_##n = {};                        \
-    static const struct circular_scroll_config circular_scroll_config_##n = {                \
-        .pressure_threshold = DT_INST_PROP(n, pressure_threshold),                           \
-        .x_max = DT_INST_PROP(n, x_max),                                                     \
-        .y_max = DT_INST_PROP(n, y_max),                                                     \
-        .inner_ring_pct = DT_INST_PROP(n, inner_ring_pct),                                   \
-        .sector_half_angle_deg = DT_INST_PROP(n, sector_half_angle_deg),                     \
-        .activation_angle_deg = DT_INST_PROP(n, activation_angle_deg),                       \
-        .scroll_angle_deg = DT_INST_PROP(n, scroll_angle_deg),                               \
-        .invert_vertical = DT_INST_PROP(n, invert_vertical),                                 \
-        .invert_horizontal = DT_INST_PROP(n, invert_horizontal),                             \
-    };                                                                                       \
-    DEVICE_DT_INST_DEFINE(n, circular_scroll_init, NULL, &circular_scroll_data_##n,         \
-                          &circular_scroll_config_##n, POST_KERNEL,                          \
-                          CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &circular_scroll_driver_api);
+#define CIRC_SCROLL_INST(n)                                                    \
+    static struct circular_scroll_data circ_scroll_data_##n = {};              \
+    static const struct circular_scroll_config circ_scroll_cfg_##n = {        \
+        .pressure_threshold    = DT_INST_PROP(n, pressure_threshold),         \
+        .x_max                 = DT_INST_PROP(n, x_max),                      \
+        .y_max                 = DT_INST_PROP(n, y_max),                      \
+        .inner_ring_pct        = DT_INST_PROP(n, inner_ring_pct),             \
+        .sector_half_angle_deg = DT_INST_PROP(n, sector_half_angle_deg),      \
+        .activation_angle_deg  = DT_INST_PROP(n, activation_angle_deg),       \
+        .scroll_angle_deg      = DT_INST_PROP(n, scroll_angle_deg),           \
+        .invert_vertical       = DT_INST_PROP(n, invert_vertical),            \
+        .invert_horizontal     = DT_INST_PROP(n, invert_horizontal),          \
+    };                                                                         \
+    DEVICE_DT_INST_DEFINE(n, circular_scroll_init, NULL,                       \
+                          &circ_scroll_data_##n, &circ_scroll_cfg_##n,        \
+                          POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,   \
+                          &circular_scroll_api);
 
-DT_INST_FOREACH_STATUS_OKAY(CIRCULAR_SCROLL_INST)
+DT_INST_FOREACH_STATUS_OKAY(CIRC_SCROLL_INST)
