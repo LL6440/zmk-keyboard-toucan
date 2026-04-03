@@ -50,6 +50,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define LIFT_SPEED           2
 #define LIFT_FRAMES          8
 
+/* ABS_Z debouncing / hysteresis for stable touch release. */
+#define ABS_Z_UP_MARGIN      3   /* release only when z <= threshold - margin */
+#define ABS_Z_UP_FRAMES      4   /* consecutive low-Z frames required */
+
 /* Phase 1: accumulate initial direction over SETTLE_FRAMES valid frames. */
 #define SETTLE_FRAMES        8
 
@@ -110,6 +114,8 @@ struct circular_scroll_data {
     /* Touch state from ABS_Z when available. */
     bool    touch_active;
     bool    pressure_supported;
+    int32_t last_z;
+    int     low_z_count;
 
     /* Fallback finger-lift detector (used only without ABS_Z). */
     int     lift_count;
@@ -117,24 +123,30 @@ struct circular_scroll_data {
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
+static void gesture_reset(struct circular_scroll_data *d) {
+    d->head           = 0;
+    d->filled         = 0;
+    d->curr_dx        = 0;
+    d->have_x         = false;
+    d->state          = STATE_IDLE;
+    d->scroll_axis    = AXIS_VERTICAL;
+    d->angle_accum    = 0.0f;
+    d->settle_count   = 0;
+    d->settle_sum_dx  = 0;
+    d->settle_sum_dy  = 0;
+    d->init_nx        = 0.0f;
+    d->init_ny        = 0.0f;
+    d->circ_count     = 0;
+    d->straight_count = 0;
+    d->lift_count     = 0;
+}
+
 static void full_reset(struct circular_scroll_data *d) {
-    d->head          = 0;
-    d->filled        = 0;
-    d->curr_dx       = 0;
-    d->have_x        = false;
-    d->state         = STATE_IDLE;
-    d->scroll_axis   = AXIS_VERTICAL;
-    d->angle_accum   = 0.0f;
-    d->settle_count  = 0;
-    d->settle_sum_dx = 0;
-    d->settle_sum_dy = 0;
-    d->init_nx       = 0.0f;
-    d->init_ny       = 0.0f;
-    d->circ_count    = 0;
-    d->straight_count= 0;
-    d->touch_active  = false;
+    gesture_reset(d);
+    d->touch_active       = false;
     d->pressure_supported = false;
-    d->lift_count    = 0;
+    d->last_z             = 0;
+    d->low_z_count        = 0;
 }
 
 static void push_vel(struct circular_scroll_data *d, int32_t dx, int32_t dy) {
@@ -175,7 +187,8 @@ static int32_t process_vector(struct circular_scroll_data *d,
                     LOG_ERR("CIRC lift (was %s)",
                             d->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
                 }
-                full_reset(d);
+                gesture_reset(d);
+                d->touch_active = false;
             }
             return 0;
         }
@@ -287,24 +300,35 @@ static int circular_scroll_handle_event(const struct device *dev,
 
     if (event->type == INPUT_EV_ABS && event->code == INPUT_ABS_Z) {
         bool was_touching = data->touch_active;
+        int32_t up_threshold = MAX((int32_t)cfg->pressure_threshold - ABS_Z_UP_MARGIN, 0);
 
         data->pressure_supported = true;
+        data->last_z = event->value;
 
-        if (event->value < cfg->pressure_threshold) {
-            if (was_touching && data->state != STATE_IDLE) {
-                LOG_ERR("CIRC touch-up keep-reset (was %s)",
-                        data->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+        if (!was_touching) {
+            if (event->value >= cfg->pressure_threshold) {
+                gesture_reset(data);
+                data->touch_active = true;
+                data->low_z_count = 0;
+                LOG_ERR("CIRC touch-down z=%d", event->value);
             }
-            full_reset(data);
-            data->pressure_supported = true;
             return ZMK_INPUT_PROC_STOP;
         }
 
-        if (!was_touching) {
-            full_reset(data);
-            data->pressure_supported = true;
-            data->touch_active = true;
-            LOG_ERR("CIRC touch-down z=%d", event->value);
+        if (event->value <= up_threshold) {
+            data->low_z_count++;
+            if (data->low_z_count >= ABS_Z_UP_FRAMES) {
+                if (data->state != STATE_IDLE) {
+                    LOG_ERR("CIRC touch-up z=%d low=%d/%d (was %s)",
+                            event->value, data->low_z_count, ABS_Z_UP_FRAMES,
+                            data->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+                }
+                gesture_reset(data);
+                data->touch_active = false;
+                data->low_z_count = 0;
+            }
+        } else {
+            data->low_z_count = 0;
         }
 
         return ZMK_INPUT_PROC_STOP;
@@ -315,6 +339,8 @@ static int circular_scroll_handle_event(const struct device *dev,
     }
 
     if (data->pressure_supported && !data->touch_active) {
+        data->have_x = false;
+        data->curr_dx = 0;
         return ZMK_INPUT_PROC_STOP;
     }
 
