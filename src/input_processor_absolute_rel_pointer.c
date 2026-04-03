@@ -32,6 +32,10 @@ struct abs_rel_pointer_data {
     bool touch_active;
     bool x_anchored;
     bool y_anchored;
+
+    /* Throttled logging */
+    int log_count;       /* counts events of any type */
+    bool logged_type;    /* did we log the event type at least once? */
 };
 
 static void abs_rel_pointer_reset(struct abs_rel_pointer_data *data) {
@@ -46,12 +50,8 @@ static void abs_rel_pointer_reset(struct abs_rel_pointer_data *data) {
 }
 
 static int32_t clamp_step(int32_t value, int32_t max_abs) {
-    if (value > max_abs) {
-        return max_abs;
-    }
-    if (value < -max_abs) {
-        return -max_abs;
-    }
+    if (value > max_abs) return max_abs;
+    if (value < -max_abs) return -max_abs;
     return value;
 }
 
@@ -65,19 +65,25 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
     const struct abs_rel_pointer_config *cfg = dev->config;
     struct abs_rel_pointer_data *data = dev->data;
 
+    /* ── Log event type on first occurrence, then every 200 events ── */
+    data->log_count++;
+    if (!data->logged_type || data->log_count >= 200) {
+        data->logged_type = true;
+        data->log_count = 0;
+        LOG_ERR("ABSP event type=0x%02x code=0x%02x val=%d",
+                event->type, event->code, event->value);
+    }
+
     if (event->type != INPUT_EV_ABS) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
+    /* ── ABS event: log coordinates every 20 ABS_Z (= one full touch report) ── */
     switch (event->code) {
-    case INPUT_ABS_X: {
+    case INPUT_ABS_X:
         data->x = event->value;
-        LOG_ERR("PAD X=%d Z=%d", data->x, data->z);
 
-        if (!data->touch_active) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
+        if (!data->touch_active) return ZMK_INPUT_PROC_STOP;
         if (!data->x_anchored) {
             data->last_x = data->x;
             data->x_anchored = true;
@@ -87,33 +93,22 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
         data->rem_x += data->x - data->last_x;
         data->last_x = data->x;
 
-        int32_t step = data->rem_x / (int32_t)MAX(cfg->x_div, 1);
-        data->rem_x -= step * (int32_t)MAX(cfg->x_div, 1);
-
-        if (cfg->invert_x) {
-            step = -step;
+        {
+            int32_t step = data->rem_x / (int32_t)MAX(cfg->x_div, 1);
+            data->rem_x -= step * (int32_t)MAX(cfg->x_div, 1);
+            if (cfg->invert_x) step = -step;
+            step = clamp_step(step, cfg->max_rel);
+            if (step == 0) return ZMK_INPUT_PROC_STOP;
+            event->code = INPUT_REL_X;
+            event->value = step;
+            event->type = INPUT_EV_REL;
         }
-
-        step = clamp_step(step, cfg->max_rel);
-
-        if (step == 0) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        event->code = INPUT_REL_X;
-        event->value = step;
-        event->type = INPUT_EV_REL;
         return ZMK_INPUT_PROC_CONTINUE;
-    }
 
-    case INPUT_ABS_Y: {
+    case INPUT_ABS_Y:
         data->y = event->value;
-        LOG_ERR("PAD Y=%d Z=%d", data->y, data->z);
 
-        if (!data->touch_active) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
+        if (!data->touch_active) return ZMK_INPUT_PROC_STOP;
         if (!data->y_anchored) {
             data->last_y = data->y;
             data->y_anchored = true;
@@ -123,34 +118,30 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
         data->rem_y += data->y - data->last_y;
         data->last_y = data->y;
 
-        int32_t step = data->rem_y / (int32_t)MAX(cfg->y_div, 1);
-        data->rem_y -= step * (int32_t)MAX(cfg->y_div, 1);
-
-        if (cfg->invert_y) {
-            step = -step;
+        {
+            int32_t step = data->rem_y / (int32_t)MAX(cfg->y_div, 1);
+            data->rem_y -= step * (int32_t)MAX(cfg->y_div, 1);
+            if (cfg->invert_y) step = -step;
+            step = clamp_step(step, cfg->max_rel);
+            if (step == 0) return ZMK_INPUT_PROC_STOP;
+            event->code = INPUT_REL_Y;
+            event->value = step;
+            event->type = INPUT_EV_REL;
         }
-
-        step = clamp_step(step, cfg->max_rel);
-
-        if (step == 0) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        event->code = INPUT_REL_Y;
-        event->value = step;
-        event->type = INPUT_EV_REL;
         return ZMK_INPUT_PROC_CONTINUE;
-    }
 
     case INPUT_ABS_Z:
         data->z = event->value;
-        LOG_ERR("PAD Z=%d X=%d Y=%d", data->z, data->x, data->y);
+        /* Log absolute coordinates on every touch (throttled to 1 per ~140ms). */
+        if (data->log_count == 0 || !data->touch_active) {
+            LOG_ERR("ABSP ABS X=%d Y=%d Z=%d touch=%d",
+                    data->x, data->y, data->z, data->touch_active);
+        }
 
         if (data->z < cfg->pressure_threshold) {
             abs_rel_pointer_reset(data);
             return ZMK_INPUT_PROC_STOP;
         }
-
         if (!data->touch_active) {
             data->touch_active = true;
             data->x_anchored = false;
@@ -158,7 +149,6 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
             data->rem_x = 0;
             data->rem_y = 0;
         }
-
         return ZMK_INPUT_PROC_STOP;
 
     default:
@@ -168,7 +158,6 @@ static int abs_rel_pointer_handle_event(const struct device *dev, struct input_e
 
 static int abs_rel_pointer_init(const struct device *dev) {
     struct abs_rel_pointer_data *data = dev->data;
-
     abs_rel_pointer_reset(data);
     return 0;
 }

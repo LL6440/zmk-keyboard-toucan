@@ -117,6 +117,11 @@ struct circular_scroll_data {
 
     /* Finger-lift detector. */
     int     lift_count;
+
+    /* Accumulated position since finger-down (for logging). */
+    int32_t pos_x;
+    int32_t pos_y;
+    int     log_frame;   /* kept for compat, unused */
 };
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -137,6 +142,9 @@ static void full_reset(struct circular_scroll_data *d) {
     d->straight_count= 0;
     d->angle_accum   = 0.0f;
     d->lift_count    = 0;
+    d->pos_x         = 0;
+    d->pos_y         = 0;
+    d->log_frame     = 0;
 }
 
 static void push_vel(struct circular_scroll_data *d, int32_t dx, int32_t dy) {
@@ -165,13 +173,16 @@ static int32_t process_vector(struct circular_scroll_data *d,
     if (speed <= LIFT_SPEED) {
         d->lift_count++;
         if (d->lift_count >= LIFT_FRAMES) {
+            LOG_ERR("CIRC -> LIFT final_pos=(%d,%d)", (int)d->pos_x, (int)d->pos_y);
             full_reset(d);
         }
         return 0;
     }
     d->lift_count = 0;
 
-    push_vel(d, dx, dy);
+    /* Accumulate position for logging. */
+    d->pos_x += dx;
+    d->pos_y += dy;
 
     /* ── Locked: CURSOR ── */
     if (d->state == STATE_CURSOR) {
@@ -250,12 +261,19 @@ static int32_t process_vector(struct circular_scroll_data *d,
         if (d->circ_count >= CIRC_CONFIRM) {
             d->state       = STATE_SCROLL;
             d->angle_accum = 0.0f;
+            LOG_ERR("CIRC -> SCROLL axis=%s pos=(%d,%d) init=(%.2f,%.2f)",
+                    (d->scroll_axis == AXIS_VERTICAL) ? "VERT" : "HORIZ",
+                    (int)d->pos_x, (int)d->pos_y,
+                    (double)d->init_nx, (double)d->init_ny);
         }
     } else {
         d->straight_count++;
         d->circ_count = 0;
         if (d->straight_count >= STRAIGHT_CONFIRM) {
             d->state = STATE_CURSOR;
+            LOG_ERR("CIRC -> CURSOR pos=(%d,%d) init=(%.2f,%.2f)",
+                    (int)d->pos_x, (int)d->pos_y,
+                    (double)d->init_nx, (double)d->init_ny);
         }
     }
 
