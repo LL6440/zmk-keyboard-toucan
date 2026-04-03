@@ -107,7 +107,7 @@
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_circular_scroll &toucan_abs_pointer>;
+        input-processors = <&toucan_circular_scroll>;
     };
 
     toucan_circular_scroll: toucan_circular_scroll {
@@ -121,16 +121,6 @@
         activation-angle-deg = <10>;
         scroll-angle-deg = <12>;
         invert-horizontal;
-        status = "okay";
-    };
-
-    toucan_abs_pointer: toucan_abs_pointer {
-        compatible = "zmk,input-processor-absolute-rel-pointer";
-        #input-processor-cells = <0>;
-        pressure-threshold = <8>;
-        x-div = <8>;
-        y-div = <8>;
-        max-rel = <40>;
         status = "okay";
     };
 };

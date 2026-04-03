@@ -1,23 +1,23 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * Circular scroll — direction-at-touch-start detection.
+ * Circular scroll — direction-at-touch-start detection (REL-event based).
  *
- * Mode selection:
- *   Phase 1 – SETTLING (first SETTLE_FRAMES valid frames):
- *     Accumulate the initial direction vector of the finger.
+ * The Cirque module emits REL_X / REL_Y events directly.  No ABS events
+ * are available, so position is inferred from the initial motion direction.
+ *
+ * Mode selection at each touch:
+ *   Phase 1 – SETTLING (SETTLE_FRAMES valid frames):
+ *     Accumulate the initial direction vector.
  *
  *   Phase 2 – CONFIRMING:
- *     Compare each new motion vector against the initial direction.
- *     If the direction CURVES (cross-product large) → SCROLL mode.
- *       Scroll axis = initial dominant direction:
- *         |dy| > |dx|  →  VERTICAL scroll   (finger started at ~3h or ~9h)
- *         |dx| > |dy|  →  HORIZONTAL scroll  (finger started at ~6h or ~12h)
- *     If direction stays STRAIGHT → CURSOR mode.
+ *     Compare each new motion vector against the established initial direction.
+ *     • Direction CURVES  → SCROLL (axis = initial dominant direction)
+ *         |dy| ≥ |dx|  → VERTICAL   (finger at ~3h or ~9h)
+ *         |dx| >  |dy| → HORIZONTAL (finger at ~6h or ~12h)
+ *     • Direction STRAIGHT → CURSOR
  *
- *   Once a mode is chosen it is locked until the finger is lifted.
- *
- * Finger-lift detection: LIFT_FRAMES consecutive frames with speed ≤ LIFT_SPEED.
+ *   Mode locked until finger lift (LIFT_FRAMES consecutive slow frames).
  */
 
 #define DT_DRV_COMPAT zmk_input_processor_circular_scroll
@@ -39,40 +39,34 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* ── tuneable constants ─────────────────────────────────────────────────── */
 
-/* Ring-buffer for scroll-angle accumulation. */
+/* Ring-buffer for scroll-angle accumulation (must be > COMPARE_OFFSET). */
 #define HIST_SIZE           16
-#define COMPARE_OFFSET       8   /* samples back for swept-angle computation */
+#define COMPARE_OFFSET       8
 
-/* Minimum |dx|+|dy| to count as valid motion (filter pad noise). */
-#define MIN_SPEED            5
+/* Minimum |dx|+|dy| to count as valid motion. */
+#define MIN_SPEED            4
 
 /* Finger-lift: LIFT_FRAMES consecutive frames with speed ≤ LIFT_SPEED → reset. */
-#define LIFT_SPEED           3
-#define LIFT_FRAMES          6
+#define LIFT_SPEED           2
+#define LIFT_FRAMES          8
 
-/* Phase 1 – initial direction settling. */
-#define SETTLE_FRAMES        7   /* valid frames to accumulate initial dir   */
+/* Phase 1: accumulate initial direction over SETTLE_FRAMES valid frames. */
+#define SETTLE_FRAMES        8
 
-/* Phase 2 – curvature confirmation. */
-/* |sin(angle between initial_dir and current motion)| threshold.           */
-#define CURVE_SIN_MIN        0.28f
-/* Consecutive curved frames required to enter SCROLL mode. */
-#define CIRC_CONFIRM         3
-/* Consecutive straight frames required to enter CURSOR mode. */
-#define STRAIGHT_CONFIRM     8
+/* Phase 2: curvature detection thresholds. */
+#define CURVE_SIN_MIN        0.25f   /* |sin| of angle vs initial dir       */
+#define CIRC_CONFIRM         3       /* consecutive curved frames → SCROLL   */
+#define STRAIGHT_CONFIRM    10       /* consecutive straight frames → CURSOR */
 
 /* Degrees of arc per scroll tick (overridden by DTS scroll-angle-deg). */
-#define DEFAULT_SCROLL_DEG   12
+#define DEFAULT_SCROLL_DEG  12
 
-/* ── types ──────────────────────────────────────────────────────────────── */
+/* ── state machine ───────────────────────────────────────────────────────── */
 
-enum circ_state {
-    STATE_IDLE = 0,   /* settling or confirming — no mode locked yet */
-    STATE_SCROLL,     /* circular scroll, locked until lift           */
-    STATE_CURSOR,     /* plain cursor, locked until lift              */
-};
+enum circ_state { STATE_IDLE = 0, STATE_SCROLL, STATE_CURSOR };
+enum circ_axis  { AXIS_VERTICAL = 0, AXIS_HORIZONTAL };
 
-enum circ_axis { AXIS_VERTICAL = 0, AXIS_HORIZONTAL };
+/* ── config / data ───────────────────────────────────────────────────────── */
 
 struct circular_scroll_config {
     uint16_t pressure_threshold;
@@ -93,35 +87,28 @@ struct circular_scroll_data {
     int     head;
     int     filled;
 
-    /* REL_X accumulator (paired with the following REL_Y). */
+    /* Current-report REL_X accumulator. */
     int32_t curr_dx;
     bool    have_x;
 
     /* State machine. */
     enum circ_state state;
     enum circ_axis  scroll_axis;
+    float           angle_accum;
 
     /* Phase 1 – settle. */
-    int     settle_count;     /* valid frames accumulated so far     */
-    int32_t settle_sum_dx;    /* accumulated dx during settle        */
-    int32_t settle_sum_dy;    /* accumulated dy during settle        */
+    int     settle_count;
+    int32_t settle_sum_dx;
+    int32_t settle_sum_dy;
 
-    /* Phase 2 – confirm. Normalised initial direction vector. */
-    float   init_nx;          /* x component (unit vector)           */
-    float   init_ny;          /* y component (unit vector)           */
-    int     circ_count;       /* consecutive curved frames           */
-    int     straight_count;   /* consecutive straight frames         */
-
-    /* Scroll angle accumulator (used in STATE_SCROLL). */
-    float   angle_accum;
+    /* Phase 2 – confirm. Normalised initial direction. */
+    float   init_nx;
+    float   init_ny;
+    int     circ_count;
+    int     straight_count;
 
     /* Finger-lift detector. */
     int     lift_count;
-
-    /* Accumulated position since finger-down (for logging). */
-    int32_t pos_x;
-    int32_t pos_y;
-    int     log_frame;   /* kept for compat, unused */
 };
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
@@ -133,6 +120,7 @@ static void full_reset(struct circular_scroll_data *d) {
     d->have_x        = false;
     d->state         = STATE_IDLE;
     d->scroll_axis   = AXIS_VERTICAL;
+    d->angle_accum   = 0.0f;
     d->settle_count  = 0;
     d->settle_sum_dx = 0;
     d->settle_sum_dy = 0;
@@ -140,11 +128,7 @@ static void full_reset(struct circular_scroll_data *d) {
     d->init_ny       = 0.0f;
     d->circ_count    = 0;
     d->straight_count= 0;
-    d->angle_accum   = 0.0f;
     d->lift_count    = 0;
-    d->pos_x         = 0;
-    d->pos_y         = 0;
-    d->log_frame     = 0;
 }
 
 static void push_vel(struct circular_scroll_data *d, int32_t dx, int32_t dy) {
@@ -169,44 +153,44 @@ static int32_t process_vector(struct circular_scroll_data *d,
 {
     int speed = IABS(dx) + IABS(dy);
 
-    /* ── Finger-lift detection (all states) ── */
+    /* ── Finger-lift detection ── */
     if (speed <= LIFT_SPEED) {
         d->lift_count++;
         if (d->lift_count >= LIFT_FRAMES) {
-            LOG_ERR("CIRC -> LIFT final_pos=(%d,%d)", (int)d->pos_x, (int)d->pos_y);
+            if (d->state != STATE_IDLE) {
+                LOG_ERR("CIRC lift (was %s)",
+                        d->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+            }
             full_reset(d);
         }
         return 0;
     }
     d->lift_count = 0;
 
-    /* Accumulate position for logging. */
-    d->pos_x += dx;
-    d->pos_y += dy;
+    push_vel(d, dx, dy);
 
     /* ── Locked: CURSOR ── */
     if (d->state == STATE_CURSOR) {
-        return 0;  /* pass events through normally */
+        return 0;
     }
 
     /* ── Locked: SCROLL ── */
     if (d->state == STATE_SCROLL) {
-        if (d->filled <= COMPARE_OFFSET || speed < MIN_SPEED) {
-            return 0;
-        }
+        if (d->filled <= COMPARE_OFFSET || speed < MIN_SPEED) return 0;
+
         int32_t px, py;
         get_past(d, COMPARE_OFFSET, &px, &py);
 
-        float cross = (float)px * dy - (float)py * dx;
-        float dot   = (float)px * dx + (float)py * dy;
-        float swept = atan2f(cross, dot + 1e-6f) * RAD_TO_DEG;
+        float cross  = (float)px * dy - (float)py * dx;
+        float dot    = (float)px * dx + (float)py * dy;
+        float swept  = atan2f(cross, dot + 1e-6f) * RAD_TO_DEG;
 
         d->angle_accum += swept;
 
         int32_t sdeg = (cfg->scroll_angle_deg > 0)
                        ? cfg->scroll_angle_deg : DEFAULT_SCROLL_DEG;
 
-        if (IABS((int)d->angle_accum) < sdeg) { return 0; }
+        if (IABS((int)d->angle_accum) < sdeg) return 0;
 
         int32_t ticks   = (int32_t)(d->angle_accum / (float)sdeg);
         d->angle_accum -= (float)ticks * (float)sdeg;
@@ -214,29 +198,23 @@ static int32_t process_vector(struct circular_scroll_data *d,
     }
 
     /* ── STATE_IDLE: phase 1 (settle) or phase 2 (confirm) ── */
+    if (speed < MIN_SPEED) return 0;
 
-    if (speed < MIN_SPEED) { return 0; }
-
-    /* Phase 1 — accumulate initial direction. */
+    /* Phase 1 */
     if (d->settle_count < SETTLE_FRAMES) {
         d->settle_sum_dx += dx;
         d->settle_sum_dy += dy;
         d->settle_count++;
 
         if (d->settle_count == SETTLE_FRAMES) {
-            /* Compute and store normalised initial direction. */
             float mag = sqrtf((float)d->settle_sum_dx * d->settle_sum_dx +
                               (float)d->settle_sum_dy * d->settle_sum_dy);
             if (mag > 0.5f) {
                 d->init_nx = d->settle_sum_dx / mag;
                 d->init_ny = d->settle_sum_dy / mag;
-                /* Choose scroll axis from dominant component of initial dir. */
-                if (IABS((int)(d->init_ny * 1000)) >=
-                    IABS((int)(d->init_nx * 1000))) {
-                    d->scroll_axis = AXIS_VERTICAL;
-                } else {
-                    d->scroll_axis = AXIS_HORIZONTAL;
-                }
+                d->scroll_axis = (IABS((int)(d->init_ny * 1000)) >=
+                                  IABS((int)(d->init_nx * 1000)))
+                                 ? AXIS_VERTICAL : AXIS_HORIZONTAL;
             } else {
                 /* Barely moved — restart settle. */
                 d->settle_count  = 0;
@@ -247,13 +225,13 @@ static int32_t process_vector(struct circular_scroll_data *d,
         return 0;
     }
 
-    /* Phase 2 — check if motion curves relative to initial direction. */
+    /* Phase 2: curvature detection */
     float cur_mag = sqrtf((float)dx*dx + (float)dy*dy);
-    if (cur_mag < 1.0f) { return 0; }
+    if (cur_mag < 1.0f) return 0;
 
-    /* Cross product of initial_dir (unit) with current motion (unit). */
-    float cross_n = d->init_nx * (dy / cur_mag) - d->init_ny * (dx / cur_mag);
-    bool curved   = (IABS((int)(cross_n * 1000)) > (int)(CURVE_SIN_MIN * 1000));
+    float cross_n = d->init_nx * (dy / cur_mag)
+                  - d->init_ny * (dx / cur_mag);
+    bool curved = (IABS((int)(cross_n * 1000)) > (int)(CURVE_SIN_MIN * 1000));
 
     if (curved) {
         d->circ_count++;
@@ -261,9 +239,8 @@ static int32_t process_vector(struct circular_scroll_data *d,
         if (d->circ_count >= CIRC_CONFIRM) {
             d->state       = STATE_SCROLL;
             d->angle_accum = 0.0f;
-            LOG_ERR("CIRC -> SCROLL axis=%s pos=(%d,%d) init=(%.2f,%.2f)",
-                    (d->scroll_axis == AXIS_VERTICAL) ? "VERT" : "HORIZ",
-                    (int)d->pos_x, (int)d->pos_y,
+            LOG_ERR("CIRC -> SCROLL %s init=(%.2f,%.2f)",
+                    d->scroll_axis == AXIS_VERTICAL ? "VERT" : "HORIZ",
                     (double)d->init_nx, (double)d->init_ny);
         }
     } else {
@@ -271,8 +248,7 @@ static int32_t process_vector(struct circular_scroll_data *d,
         d->circ_count = 0;
         if (d->straight_count >= STRAIGHT_CONFIRM) {
             d->state = STATE_CURSOR;
-            LOG_ERR("CIRC -> CURSOR pos=(%d,%d) init=(%.2f,%.2f)",
-                    (int)d->pos_x, (int)d->pos_y,
+            LOG_ERR("CIRC -> CURSOR init=(%.2f,%.2f)",
                     (double)d->init_nx, (double)d->init_ny);
         }
     }
@@ -301,7 +277,6 @@ static int circular_scroll_handle_event(const struct device *dev,
     if (event->code == INPUT_REL_X) {
         data->curr_dx = event->value;
         data->have_x  = true;
-        /* Suppress X cursor movement once in scroll mode. */
         return (data->state == STATE_SCROLL)
                ? ZMK_INPUT_PROC_STOP : ZMK_INPUT_PROC_CONTINUE;
     }
@@ -319,11 +294,11 @@ static int circular_scroll_handle_event(const struct device *dev,
         }
 
         if (data->scroll_axis == AXIS_VERTICAL) {
-            if (cfg->invert_vertical) { ticks = -ticks; }
+            if (cfg->invert_vertical) ticks = -ticks;
             event->code  = INPUT_REL_WHEEL;
             event->value = ticks;
         } else {
-            if (cfg->invert_horizontal) { ticks = -ticks; }
+            if (cfg->invert_horizontal) ticks = -ticks;
             event->code  = INPUT_REL_HWHEEL;
             event->value = ticks;
         }
