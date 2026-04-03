@@ -174,7 +174,16 @@ static enum circ_axis configure_start_sector(const struct circular_scroll_config
 
 /* ── per-report processing ───────────────────────────────────────────────── */
 static bool decide_gesture_start(struct circular_scroll_data *d) {
+    /*
+     * Do not decide "normal pointer" until we actually know the start point.
+     * On some report sequences ABS_X/ABS_Y arrive before pressure goes active,
+     * or slightly after the first REL samples. If we classify too early while
+     * candidate_axis is still unknown, scroll can never start for that contact.
+     */
     if (d->candidate_axis == AXIS_UNKNOWN) {
+        if (!d->have_abs_x || !d->have_abs_y) {
+            return false;
+        }
         d->scroll_axis = AXIS_UNKNOWN;
         d->start_decided = true;
         return true;
@@ -332,8 +341,6 @@ static int circular_scroll_handle_event(const struct device *dev,
                 data->angle_accum   = 0.0f;
                 data->enter_count   = 0;
                 data->circ_sign     = 0.0f;
-                data->have_abs_x    = false;
-                data->have_abs_y    = false;
                 data->start_decided = false;
                 data->start_radial_x = 0.0f;
                 data->start_radial_y = 0.0f;
@@ -341,6 +348,16 @@ static int circular_scroll_handle_event(const struct device *dev,
                 data->start_tangent_y = 0.0f;
                 data->decision_dx = 0;
                 data->decision_dy = 0;
+
+                /*
+                 * Keep the latest ABS coordinates if they were already reported
+                 * before pressure crossed the active threshold, and classify the
+                 * start sector immediately from them.
+                 */
+                if (data->have_abs_x && data->have_abs_y) {
+                    data->candidate_axis =
+                        configure_start_sector(cfg, data, data->abs_x, data->abs_y);
+                }
             }
             return ZMK_INPUT_PROC_CONTINUE;
 
