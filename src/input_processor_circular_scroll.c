@@ -162,18 +162,44 @@ static bool maybe_lock_candidate(struct circular_scroll_data *data, int32_t dx, 
 
     float total_dx = (float)(data->x - data->start_x);
     float total_dy = (float)(data->y - data->start_y);
-    int total_speed = (int)(absf_local(total_dx) + absf_local(total_dy));
+    float abs_dx = absf_local(total_dx);
+    float abs_dy = absf_local(total_dy);
+    int total_speed = (int)(abs_dx + abs_dy);
     if (total_speed < DECISION_SPEED) {
         return false;
     }
 
-    float tangential = absf_local(total_dx * data->start_tangent_x + total_dy * data->start_tangent_y);
-    float radial = absf_local(total_dx * data->start_radial_x + total_dy * data->start_radial_y);
+    if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL) {
+        /*
+         * Start near 3h/9h:
+         *   - first mostly vertical motion => circular vertical scroll
+         *   - first mostly horizontal motion => normal pointer
+         */
+        if ((abs_dy - abs_dx) >= DECISION_MARGIN) {
+            data->mode = CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL;
+            data->captured = false;
+            data->angle_accum_deg = 0.0f;
+            data->prev_dx = dx;
+            data->prev_dy = dy;
+            data->have_prev_vec = true;
+            return false;
+        }
 
-    if ((tangential - radial) >= DECISION_MARGIN) {
-        data->mode = (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL)
-                         ? CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL
-                         : CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL;
+        if ((abs_dx - abs_dy) >= DECISION_MARGIN) {
+            data->mode = CIRCULAR_SCROLL_MODE_POINTER;
+            return true;
+        }
+
+        return false;
+    }
+
+    /*
+     * Start near 6h/12h:
+     *   - first mostly horizontal motion => circular horizontal scroll
+     *   - first mostly vertical motion   => normal pointer
+     */
+    if ((abs_dx - abs_dy) >= DECISION_MARGIN) {
+        data->mode = CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL;
         data->captured = false;
         data->angle_accum_deg = 0.0f;
         data->prev_dx = dx;
@@ -182,7 +208,7 @@ static bool maybe_lock_candidate(struct circular_scroll_data *data, int32_t dx, 
         return false;
     }
 
-    if ((radial - tangential) >= DECISION_MARGIN) {
+    if ((abs_dy - abs_dx) >= DECISION_MARGIN) {
         data->mode = CIRCULAR_SCROLL_MODE_POINTER;
         return true;
     }
