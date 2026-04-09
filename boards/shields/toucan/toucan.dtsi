@@ -2,6 +2,8 @@
 #include <dt-bindings/zmk/input_transform.h>
 #include <dt-bindings/zmk/matrix_transform.h>
 #include <physical_layouts.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <dt-bindings/zmk/pointing.h>
 
 
 / {
@@ -90,6 +92,18 @@
                                 RC(3,3) RC(3,4) RC(3,5)  RC(3,6) RC(3,7) RC(3,8)
         >;
     };
+
+    behaviors {
+        touch_tap_click: touch_tap_click {
+            compatible = "zmk,behavior-hold-tap";
+            label = "TOUCH_TAP_CLICK";
+            #binding-cells = <2>;
+            flavor = "tap-preferred";
+            tapping-term-ms = <150>;
+            quick-tap-ms = <150>;
+            bindings = <&none>, <&mkp>;
+        };
+    };
 };
 
 / {
@@ -107,7 +121,7 @@
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_circular_scroll>;
+        input-processors = <&toucan_touch_tap &toucan_circular_scroll &toucan_abs_pointer>;
     };
 
     toucan_circular_scroll: toucan_circular_scroll {
@@ -116,11 +130,30 @@
         pressure-threshold = <8>;
         x-max = <2047>;
         y-max = <1535>;
-        inner-ring-pct = <65>;
-        sector-half-angle-deg = <40>;
+        inner-ring-pct = <72>;
+        sector-half-angle-deg = <30>;
         activation-angle-deg = <10>;
         scroll-angle-deg = <12>;
-        invert-horizontal;
+        invert-vertical;
         status = "okay";
+    };
+
+    toucan_abs_pointer: toucan_abs_pointer {
+        compatible = "zmk,input-processor-absolute-rel-pointer";
+        #input-processor-cells = <0>;
+        pressure-threshold = <8>;
+        x-div = <8>;
+        y-div = <8>;
+        max-rel = <40>;
+        status = "okay";
+    };
+
+    input_processors {
+        toucan_touch_tap: toucan_touch_tap {
+            compatible = "zmk,input-processor-behaviors";
+            #input-processor-cells = <0>;
+            codes = <INPUT_BTN_TOUCH>;
+            bindings = <&touch_tap_click 0 LCLK>;
+        };
     };
 };
