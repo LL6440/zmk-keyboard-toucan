@@ -1,0 +1,3 @@
+# Kconfig — Toucan keyboard ZMK module
+# Custom symbol declarations live here if needed in the future.
+# The circular scroll processor uses ZMK's existing CONFIG_ZMK_POINTING.

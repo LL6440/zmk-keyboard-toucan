@@ -103,18 +103,54 @@
         };
     };
 
+    /*
+     * Circular gesture scroll processor.
+     *
+     * Place the finger at the edge of the pad and start a circular motion:
+     *   - Initial movement vertical   (from 3h or 9h) → vertical scroll
+     *   - Initial movement horizontal (from 6h or 12h) → horizontal scroll
+     *   - Straight / radial motion                      → pointer (no scroll)
+     *
+     * The mode is locked until the finger is lifted.
+     * Clockwise rotation scrolls down (vertical) or right (horizontal).
+     * Works on all layers — no layer restriction.
+     *
+     * Tuning:
+     *   detect-samples   – events per detection phase (default 6 ≈ 120 ms)
+     *   scroll-divisor   – lower = more ticks/revolution (default 419 ≈ 15/rev)
+     *   touch-timeout-ms – inactivity reset in ms (default 200)
+     *   invert-vertical / invert-horizontal – flip scroll direction if needed
+     */
+    circular_scroll: circular_scroll {
+        compatible = "zmk,input-processor-circular-scroll";
+        #input-processor-cells = <0>;
+        detect-samples    = <6>;
+        scroll-divisor    = <419>;
+        touch-timeout-ms  = <200>;
+        /* invert-vertical; */   /* uncomment if CW scrolls up instead of down */
+        /* invert-horizontal; */ /* uncomment if CW scrolls left instead of right */
+    };
+
     glidepoint_listener: glidepoint_listener {
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&zip_xy_scaler 250 100>;
-        scroller {
-            layers = <1 2>;
-            input-processors = <
-                &zip_xy_to_scroll_mapper
-                &zip_scroll_scaler 1 5
-                &zip_scroll_transform INPUT_TRANSFORM_X_INVERT
-            >;
-        };
+        /*
+         * Processing chain (order matters):
+         *   1. circular_scroll  – gesture detection; converts circular motion
+         *                         to WHEEL / HWHEEL; zeroes events during the
+         *                         ~120 ms detection window; passes pointer
+         *                         events unchanged.
+         *   2. zip_xy_scaler    – applies 2.5× speed multiplier to pointer
+         *                         (X/Y) events only; WHEEL events pass through
+         *                         unaffected.
+         *
+         * The old layer-based scroller sub-node has been removed.
+         * Scroll is now purely gesture-activated on all layers.
+         */
+        input-processors = <
+            &circular_scroll
+            &zip_xy_scaler 250 100
+        >;
     };
 };
