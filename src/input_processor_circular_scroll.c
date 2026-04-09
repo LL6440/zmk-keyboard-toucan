@@ -1,17 +1,13 @@
 /*
  * SPDX-License-Identifier: MIT
  *
- * Circular scroll with gesture lock.
+ * Circular scroll with start-zone lock.
  *
  * Behavior:
- *  - touch must start near 3h/9h (vertical candidate) or 6h/12h (horizontal candidate)
- *  - first meaningful motion decides:
- *      tangential motion => lock scroll on candidate axis
- *      radial motion     => lock normal pointer
- *  - once locked, mode never changes until finger lift
- *
- * Scroll emission intentionally keeps the proven vector-delta accumulation path
- * from the earlier working version, because it reacted correctly on hardware.
+ *  - touch start in outer ring near 3h/9h  => vertical scroll
+ *  - touch start in outer ring near 6h/12h => horizontal scroll
+ *  - elsewhere                            => pointer
+ *  - once selected, mode stays locked until finger lift
  */
 
 #define DT_DRV_COMPAT zmk_input_processor_circular_scroll
@@ -30,14 +26,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #endif
 
 #define RAD_TO_DEG (180.0f / (float)M_PI)
-#define DECISION_SPEED 10
-#define DECISION_MARGIN 4.0f
 
 enum circular_scroll_mode {
     CIRCULAR_SCROLL_MODE_NONE = 0,
     CIRCULAR_SCROLL_MODE_POINTER,
-    CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL,
-    CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL,
     CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL,
     CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL,
 };
@@ -69,13 +61,6 @@ struct circular_scroll_data {
     bool have_y;
     enum circular_scroll_mode mode;
 
-    int32_t start_x;
-    int32_t start_y;
-    float start_radial_x;
-    float start_radial_y;
-    float start_tangent_x;
-    float start_tangent_y;
-
     int32_t prev_dx;
     int32_t prev_dy;
     float angle_accum_deg;
@@ -89,15 +74,7 @@ static void circular_scroll_reset(struct circular_scroll_data *data) {
     data->captured = false;
     data->fresh_x = false;
     data->fresh_y = false;
-    data->have_x = false;
-    data->have_y = false;
     data->mode = CIRCULAR_SCROLL_MODE_NONE;
-    data->start_x = 0;
-    data->start_y = 0;
-    data->start_radial_x = 0.0f;
-    data->start_radial_y = 0.0f;
-    data->start_tangent_x = 0.0f;
-    data->start_tangent_y = 0.0f;
     data->prev_dx = 0;
     data->prev_dy = 0;
     data->angle_accum_deg = 0.0f;
@@ -126,10 +103,6 @@ static float angle_diff_deg(float a, float b) {
     return d;
 }
 
-static float point_angle_deg(int32_t dx, int32_t dy) {
-    return atan2f((float)dy, (float)dx) * RAD_TO_DEG;
-}
-
 static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_config *cfg,
                                                    int32_t dx, int32_t dy) {
     if (!point_in_outer_ring(cfg, dx, dy)) {
@@ -141,14 +114,17 @@ static enum circular_scroll_mode choose_start_mode(const struct circular_scroll_
 
     if (absf_local(angle_diff_deg(angle, 0.0f)) <= sector ||
         absf_local(angle_diff_deg(angle, 180.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL;
+        LOG_DBG("cscroll start: vertical");
+        return CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL;
     }
 
     if (absf_local(angle_diff_deg(angle, 90.0f)) <= sector ||
         absf_local(angle_diff_deg(angle, -90.0f)) <= sector) {
-        return CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL;
+        LOG_DBG("cscroll start: horizontal");
+        return CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL;
     }
 
+    LOG_DBG("cscroll start: pointer");
     return CIRCULAR_SCROLL_MODE_POINTER;
 }
 
@@ -161,74 +137,17 @@ static void circular_scroll_prepare_start(const struct circular_scroll_config *c
 
     data->mode = choose_start_mode(cfg, dx, dy);
     data->start_ready = true;
-    data->start_x = data->x;
-    data->start_y = data->y;
     data->have_prev_vec = true;
     data->prev_dx = dx;
     data->prev_dy = dy;
     data->angle_accum_deg = 0.0f;
     data->captured = false;
-
-    float len = sqrtf((float)dx * (float)dx + (float)dy * (float)dy);
-    if (len > 0.0f) {
-        data->start_radial_x = (float)dx / len;
-        data->start_radial_y = (float)dy / len;
-        data->start_tangent_x = -data->start_radial_y;
-        data->start_tangent_y = data->start_radial_x;
-    } else {
-        data->start_radial_x = 0.0f;
-        data->start_radial_y = 0.0f;
-        data->start_tangent_x = 0.0f;
-        data->start_tangent_y = 0.0f;
-    }
 }
 
 static float delta_angle_deg(int32_t prev_dx, int32_t prev_dy, int32_t dx, int32_t dy) {
     float cross = (float)prev_dx * (float)dy - (float)prev_dy * (float)dx;
     float dot = (float)prev_dx * (float)dx + (float)prev_dy * (float)dy;
     return atan2f(cross, dot) * RAD_TO_DEG;
-}
-
-static bool maybe_lock_candidate(struct circular_scroll_data *data, int32_t dx, int32_t dy) {
-    if (data->mode != CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL &&
-        data->mode != CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-        return true;
-    }
-
-    float total_dx = (float)(data->x - data->start_x);
-    float total_dy = (float)(data->y - data->start_y);
-    float tangential = absf_local(total_dx * data->start_tangent_x +
-                                  total_dy * data->start_tangent_y);
-    float radial = absf_local(total_dx * data->start_radial_x +
-                              total_dy * data->start_radial_y);
-    int total_speed = (int)(absf_local(total_dx) + absf_local(total_dy));
-    if (total_speed < DECISION_SPEED) {
-        return false;
-    }
-
-    if ((tangential - radial) >= DECISION_MARGIN) {
-        if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL) {
-            data->mode = CIRCULAR_SCROLL_MODE_SCROLL_VERTICAL;
-            LOG_DBG("cscroll lock: vertical");
-        } else {
-            data->mode = CIRCULAR_SCROLL_MODE_SCROLL_HORIZONTAL;
-            LOG_DBG("cscroll lock: horizontal");
-        }
-        data->captured = false;
-        data->angle_accum_deg = 0.0f;
-        data->prev_dx = dx;
-        data->prev_dy = dy;
-        data->have_prev_vec = true;
-        return false;
-    }
-
-    if ((radial - tangential) >= DECISION_MARGIN) {
-        data->mode = CIRCULAR_SCROLL_MODE_POINTER;
-        LOG_DBG("cscroll lock: pointer");
-        return true;
-    }
-
-    return false;
 }
 
 static int circular_scroll_handle_motion(const struct device *dev, struct input_event *event,
@@ -259,24 +178,6 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
 
     if (data->mode == CIRCULAR_SCROLL_MODE_POINTER || data->mode == CIRCULAR_SCROLL_MODE_NONE) {
         return ZMK_INPUT_PROC_CONTINUE;
-    }
-
-    if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL ||
-        data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-        if (maybe_lock_candidate(data, dx, dy)) {
-            return ZMK_INPUT_PROC_CONTINUE;
-        }
-
-        if (data->mode == CIRCULAR_SCROLL_MODE_POINTER) {
-            return ZMK_INPUT_PROC_CONTINUE;
-        }
-
-        if (data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_VERTICAL ||
-            data->mode == CIRCULAR_SCROLL_MODE_CANDIDATE_HORIZONTAL) {
-            return ZMK_INPUT_PROC_STOP;
-        }
-
-        return ZMK_INPUT_PROC_STOP;
     }
 
     if (!data->have_prev_vec) {
@@ -315,6 +216,7 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
         if (cfg->invert_vertical) {
             step = -step;
         }
+        LOG_DBG("cscroll tick: wheel=%d", step);
         event->code = INPUT_REL_WHEEL;
         event->value = step;
         return ZMK_INPUT_PROC_CONTINUE;
@@ -323,6 +225,7 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     if (cfg->invert_horizontal) {
         step = -step;
     }
+    LOG_DBG("cscroll tick: hwheel=%d", step);
     event->code = INPUT_REL_HWHEEL;
     event->value = step;
     return ZMK_INPUT_PROC_CONTINUE;
@@ -372,14 +275,10 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
             data->start_ready = false;
             data->have_prev_vec = false;
             data->captured = false;
-            data->fresh_x = data->have_x;
-            data->fresh_y = data->have_y;
+            data->fresh_x = false;
+            data->fresh_y = false;
             data->mode = CIRCULAR_SCROLL_MODE_NONE;
             data->angle_accum_deg = 0.0f;
-
-            if (data->fresh_x && data->fresh_y) {
-                circular_scroll_prepare_start(cfg, data);
-            }
         }
 
         if (data->mode == CIRCULAR_SCROLL_MODE_POINTER ||
@@ -396,6 +295,8 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
 static int circular_scroll_init(const struct device *dev) {
     struct circular_scroll_data *data = dev->data;
+    data->have_x = false;
+    data->have_y = false;
     circular_scroll_reset(data);
     return 0;
 }

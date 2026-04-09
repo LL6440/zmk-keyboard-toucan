@@ -3,7 +3,7 @@ description: |
 
 compatible: "zmk,input-processor-touch-tap"
 
-include: ip_zero_param.yaml
+include: input-processor.yaml
 
 properties:
   pressure-threshold:

@@ -118,14 +118,19 @@ static int touch_tap_handle_event(const struct device *dev, struct input_event *
         }
 
         int64_t elapsed = k_uptime_get() - data->down_ts;
-        bool is_tap = data->start_valid && !data->moved && elapsed <= (int64_t)cfg->max_tap_ms;
+        bool moved = data->moved;
+        bool start_valid = data->start_valid;
+        bool is_tap = start_valid && !moved && elapsed <= (int64_t)cfg->max_tap_ms;
 
         touch_tap_reset(data);
 
         if (!is_tap) {
+            LOG_DBG("touch_tap: no tap moved=%d elapsed=%lld start_valid=%d",
+                    moved, elapsed, start_valid);
             return ZMK_INPUT_PROC_CONTINUE;
         }
 
+        LOG_DBG("touch_tap: tap detected");
         event->type = INPUT_EV_KEY;
         event->code = INPUT_BTN_TOUCH;
         event->value = 1;

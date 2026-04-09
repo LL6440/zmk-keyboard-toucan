@@ -140,7 +140,7 @@
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_circular_scroll &toucan_abs_pointer &toucan_touch_tap_detect &toucan_touch_tap>;
+        input-processors = <&toucan_circular_scroll &toucan_touch_tap_detect &toucan_touch_tap &toucan_abs_pointer>;
     };
 
     toucan_circular_scroll: toucan_circular_scroll {
