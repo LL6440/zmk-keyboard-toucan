@@ -44,6 +44,8 @@ struct circular_scroll_data {
     int32_t z;
 
     bool touch_active;
+    bool x_fresh;
+    bool y_fresh;
     bool start_ready;
     bool have_prev_vec;
     bool captured;
@@ -58,6 +60,8 @@ struct circular_scroll_data {
 static void circular_scroll_reset(struct circular_scroll_data *data) {
     data->z = 0;
     data->touch_active = false;
+    data->x_fresh = false;
+    data->y_fresh = false;
     data->start_ready = false;
     data->have_prev_vec = false;
     data->captured = false;
@@ -119,6 +123,10 @@ static int circular_scroll_handle_motion(const struct device *dev, struct input_
     }
 
     if (!data->start_ready) {
+        if (!data->x_fresh || !data->y_fresh) {
+            return ZMK_INPUT_PROC_STOP;
+        }
+
         data->mode = choose_start_mode(cfg, dx, dy);
         data->start_ready = true;
         data->have_prev_vec = true;
@@ -205,10 +213,16 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
     switch (event->code) {
     case INPUT_ABS_X:
         data->x = event->value;
+        if (data->touch_active) {
+            data->x_fresh = true;
+        }
         return circular_scroll_handle_motion(dev, event, cfg, data);
 
     case INPUT_ABS_Y:
         data->y = event->value;
+        if (data->touch_active) {
+            data->y_fresh = true;
+        }
         return circular_scroll_handle_motion(dev, event, cfg, data);
 
     case INPUT_ABS_Z:
@@ -233,6 +247,8 @@ static int circular_scroll_handle_event(const struct device *dev, struct input_e
 
         if (!data->touch_active) {
             data->touch_active = true;
+            data->x_fresh = false;
+            data->y_fresh = false;
             data->start_ready = false;
             data->have_prev_vec = false;
             data->captured = false;

@@ -7,3 +7,8 @@ config ZMK_INPUT_PROCESSOR_CIRCULAR_SCROLL
     bool "Toucan circular scroll input processor"
     default y
     depends on DT_HAS_ZMK_INPUT_PROCESSOR_CIRCULAR_SCROLL_ENABLED
+
+config ZMK_INPUT_PROCESSOR_TOUCH_BUTTON
+    bool "Toucan touch button input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_TOUCH_BUTTON_ENABLED

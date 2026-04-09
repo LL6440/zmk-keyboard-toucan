@@ -121,7 +121,7 @@
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_touch_tap &toucan_circular_scroll &toucan_abs_pointer>;
+        input-processors = <&toucan_circular_scroll &toucan_abs_pointer &toucan_touch_button &toucan_touch_tap>;
     };
 
     toucan_circular_scroll: toucan_circular_scroll {
@@ -145,6 +145,13 @@
         x-div = <8>;
         y-div = <8>;
         max-rel = <40>;
+        status = "okay";
+    };
+
+    toucan_touch_button: toucan_touch_button {
+        compatible = "zmk,input-processor-touch-button";
+        #input-processor-cells = <0>;
+        pressure-threshold = <8>;
         status = "okay";
     };
 
