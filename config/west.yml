@@ -8,15 +8,15 @@ manifest:
       url-base: https://github.com/petejohanson/
     - name: caksoylar
       url-base: https://github.com/caksoylar
-    - name: derui
-      url-base: https://github.com/derui
+    - name: geeksville
+      url-base: https://github.com/geeksville
   projects:
     - name: zmk
       remote: zmkfirmware
       import: app/west.yml
     - name: cirque-input-module
-      remote: derui
-      revision: main
+      remote: geeksville
+      revision: toucan
     - name: zmk-rgbled-widget
       remote: caksoylar
       revision: v0.3

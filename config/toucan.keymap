@@ -312,7 +312,7 @@
         combo_enter_semi_comma {
             require-prior-idle-ms = <100>;
             timeout-ms = <100>;
-            key-positions = <14 15 16>;
+            key-positions = <26 27>;
             bindings = <&kp ENTER>;
         };
 
@@ -376,6 +376,13 @@
             timeout-ms = <100>;
             require-prior-idle-ms = <100>;
             layers = <4>;
+        };
+
+        combo_enter_s_d_f {
+            bindings = <&kp ENTER>;
+            key-positions = <15 16 14>;
+            timeout-ms = <100>;
+            require-prior-idle-ms = <100>;
         };
     };
 
