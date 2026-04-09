@@ -25,6 +25,7 @@
 #include <drivers/input_processor.h>
 #include <math.h>
 #include <zephyr/device.h>
+#include <zephyr/kernel.h>
 #include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
@@ -46,16 +47,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 /* Minimum |dx|+|dy| to count as valid motion. */
 #define MIN_SPEED            4
 
-/* Fallback finger-lift detection when ABS_Z is not available.
- *
- * Important: with REL-only Cirque reports, slow or axis-aligned motion can
- * legitimately produce tiny vectors (for example dx=1, dy=0 on a REL_Y sync).
- * Treating "slow" as finger-up causes false unlocks.
- *
- * So in REL-only mode we only consider a lift after several consecutive
- * exact-zero vectors.
- */
-#define LIFT_ZERO_FRAMES    10
+/* Fallback finger-lift detection when ABS_Z is not available. */
+#define LIFT_SPEED           2
+#define LIFT_FRAMES          8
+/* If REL events stop for this long, treat the next REL event as a new touch. */
+#define IDLE_LIFT_MS         50
+
+/* ABS_Z debouncing / hysteresis for stable touch release. */
+#define ABS_Z_UP_MARGIN      3   /* release only when z <= threshold - margin */
+#define ABS_Z_UP_FRAMES      4   /* consecutive low-Z frames required */
 
 /* Phase 1: accumulate initial direction over SETTLE_FRAMES valid frames. */
 #define SETTLE_FRAMES        8
@@ -117,31 +117,41 @@ struct circular_scroll_data {
     /* Touch state from ABS_Z when available. */
     bool    touch_active;
     bool    pressure_supported;
+    int32_t last_z;
+    int     low_z_count;
 
     /* Fallback finger-lift detector (used only without ABS_Z). */
     int     lift_count;
+    int64_t last_rel_ms;
 };
 
 /* ── helpers ─────────────────────────────────────────────────────────────── */
 
+static void gesture_reset(struct circular_scroll_data *d) {
+    d->head           = 0;
+    d->filled         = 0;
+    d->curr_dx        = 0;
+    d->have_x         = false;
+    d->state          = STATE_IDLE;
+    d->scroll_axis    = AXIS_VERTICAL;
+    d->angle_accum    = 0.0f;
+    d->settle_count   = 0;
+    d->settle_sum_dx  = 0;
+    d->settle_sum_dy  = 0;
+    d->init_nx        = 0.0f;
+    d->init_ny        = 0.0f;
+    d->circ_count     = 0;
+    d->straight_count = 0;
+    d->lift_count     = 0;
+    d->last_rel_ms     = 0;
+}
+
 static void full_reset(struct circular_scroll_data *d) {
-    d->head          = 0;
-    d->filled        = 0;
-    d->curr_dx       = 0;
-    d->have_x        = false;
-    d->state         = STATE_IDLE;
-    d->scroll_axis   = AXIS_VERTICAL;
-    d->angle_accum   = 0.0f;
-    d->settle_count  = 0;
-    d->settle_sum_dx = 0;
-    d->settle_sum_dy = 0;
-    d->init_nx       = 0.0f;
-    d->init_ny       = 0.0f;
-    d->circ_count    = 0;
-    d->straight_count= 0;
-    d->touch_active  = false;
+    gesture_reset(d);
+    d->touch_active       = false;
     d->pressure_supported = false;
-    d->lift_count    = 0;
+    d->last_z             = 0;
+    d->low_z_count        = 0;
 }
 
 static void push_vel(struct circular_scroll_data *d, int32_t dx, int32_t dy) {
@@ -169,22 +179,21 @@ static int32_t process_vector(struct circular_scroll_data *d,
     /* ── Finger-lift detection ── */
     if (d->pressure_supported) {
         /* With ABS_Z support, never unlock on slowdown alone. */
-        if (!d->touch_active) {
+        if (!d->touch_active || speed <= LIFT_SPEED) {
             return 0;
         }
         d->lift_count = 0;
     } else {
-        /* Fallback for REL-only builds: only exact 0/0 vectors may count as a
-         * finger lift. Small vectors must keep the current mode locked.
-         */
-        if (dx == 0 && dy == 0) {
+        /* Fallback for builds where only REL events are observed. */
+        if (speed <= LIFT_SPEED) {
             d->lift_count++;
-            if (d->lift_count >= LIFT_ZERO_FRAMES) {
+            if (d->lift_count >= LIFT_FRAMES) {
                 if (d->state != STATE_IDLE) {
-                    LOG_ERR("CIRC lift zero (was %s)",
+                    LOG_ERR("CIRC lift (was %s)",
                             d->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
                 }
-                full_reset(d);
+                gesture_reset(d);
+                d->touch_active = false;
             }
             return 0;
         }
@@ -296,24 +305,35 @@ static int circular_scroll_handle_event(const struct device *dev,
 
     if (event->type == INPUT_EV_ABS && event->code == INPUT_ABS_Z) {
         bool was_touching = data->touch_active;
+        int32_t up_threshold = MAX((int32_t)cfg->pressure_threshold - ABS_Z_UP_MARGIN, 0);
 
         data->pressure_supported = true;
+        data->last_z = event->value;
 
-        if (event->value < cfg->pressure_threshold) {
-            if (was_touching && data->state != STATE_IDLE) {
-                LOG_ERR("CIRC touch-up keep-reset (was %s)",
-                        data->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+        if (!was_touching) {
+            if (event->value >= cfg->pressure_threshold) {
+                gesture_reset(data);
+                data->touch_active = true;
+                data->low_z_count = 0;
+                LOG_ERR("CIRC touch-down z=%d", event->value);
             }
-            full_reset(data);
-            data->pressure_supported = true;
             return ZMK_INPUT_PROC_STOP;
         }
 
-        if (!was_touching) {
-            full_reset(data);
-            data->pressure_supported = true;
-            data->touch_active = true;
-            LOG_ERR("CIRC touch-down z=%d", event->value);
+        if (event->value <= up_threshold) {
+            data->low_z_count++;
+            if (data->low_z_count >= ABS_Z_UP_FRAMES) {
+                if (data->state != STATE_IDLE) {
+                    LOG_ERR("CIRC touch-up z=%d low=%d/%d (was %s)",
+                            event->value, data->low_z_count, ABS_Z_UP_FRAMES,
+                            data->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+                }
+                gesture_reset(data);
+                data->touch_active = false;
+                data->low_z_count = 0;
+            }
+        } else {
+            data->low_z_count = 0;
         }
 
         return ZMK_INPUT_PROC_STOP;
@@ -323,7 +343,22 @@ static int circular_scroll_handle_event(const struct device *dev,
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
+    if (!data->pressure_supported) {
+        int64_t now = k_uptime_get();
+        if (data->last_rel_ms > 0 && (now - data->last_rel_ms) > IDLE_LIFT_MS) {
+            if (data->state != STATE_IDLE) {
+                LOG_ERR("CIRC idle-lift dt=%lldms (was %s)",
+                        (long long)(now - data->last_rel_ms),
+                        data->state == STATE_SCROLL ? "SCROLL" : "CURSOR");
+            }
+            gesture_reset(data);
+        }
+        data->last_rel_ms = now;
+    }
+
     if (data->pressure_supported && !data->touch_active) {
+        data->have_x = false;
+        data->curr_dx = 0;
         return ZMK_INPUT_PROC_STOP;
     }
 
