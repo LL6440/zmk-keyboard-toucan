@@ -103,38 +103,18 @@
         };
     };
 
-    glidepoint_listener {
+    glidepoint_listener: glidepoint_listener {
         compatible = "zmk,input-listener";
         status = "disabled";
         device = <&glidepoint_split>;
-        input-processors = <&toucan_abs_pointer>;
+        input-processors = <&zip_xy_scaler 250 100>;
         scroller {
             layers = <1 2>;
-            input-processors = <&toucan_edge_scroll>;
-            process-next;
+            input-processors = <
+                &zip_xy_to_scroll_mapper
+                &zip_scroll_scaler 1 5
+                &zip_scroll_transform INPUT_TRANSFORM_X_INVERT
+            >;
         };
-    };
-
-    toucan_abs_pointer: toucan_abs_pointer {
-        compatible = "zmk,input-processor-absolute-rel-pointer";
-        #input-processor-cells = <0>;
-        pressure-threshold = <8>;
-        x-div = <8>;
-        y-div = <8>;
-        max-rel = <40>;
-        status = "okay";
-    };
-
-    toucan_edge_scroll: toucan_edge_scroll {
-        compatible = "zmk,input-processor-edge-scroll";
-        #input-processor-cells = <0>;
-        right-zone-pct = <18>;
-        top-zone-pct = <18>;
-        pressure-threshold = <8>;
-        scroll-div = <16>;
-        x-max = <2047>;
-        y-max = <1535>;
-        invert-horizontal;
-        status = "okay";
     };
 };
