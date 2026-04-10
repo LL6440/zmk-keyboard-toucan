@@ -103,6 +103,7 @@ struct cs_config {
     int32_t  tang_threshold;
     int32_t  scroll_divisor;
     int32_t  touch_timeout_ms;
+    int32_t  scroll_lock_timeout_ms;
     bool     invert_vertical;
     bool     invert_horizontal;
 };
@@ -171,15 +172,28 @@ static int cs_handle_event(const struct device *dev,
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    /* In locked scroll mode, ONLY BTN_TOUCH (handled above) resets the mode.
-     * The timeout is only used during DETECT / POINTER to detect a new touch
-     * on drivers that do not emit BTN_TOUCH events. */
-    if (data->mode != CS_MODE_SCROLL_V && data->mode != CS_MODE_SCROLL_H) {
-        if (data->last_event_ms != 0 &&
-            (now - data->last_event_ms) > (int64_t)cfg->touch_timeout_ms) {
-            cs_reset(data, now);
-            LOG_DBG("CS: timeout -> new touch");
-        }
+    /* Timeout-based finger-lift detection.
+     * The Cirque Pinnacle in relative mode does not emit BTN_TOUCH events,
+     * so we rely on inactivity to detect that the finger was lifted.
+     *
+     * Two different timeouts:
+     *   - DETECT / POINTER : touch_timeout_ms (200 ms default)
+     *     Fast reset so a new gesture can start quickly.
+     *   - SCROLL_V / SCROLL_H : scroll_lock_timeout_ms (500 ms default)
+     *     Long enough that a brief pause in circular motion does NOT
+     *     unlock, but short enough that lifting the finger does unlock
+     *     before the next touch lands.
+     */
+    bool locked = (data->mode == CS_MODE_SCROLL_V ||
+                   data->mode == CS_MODE_SCROLL_H);
+    int64_t timeout = locked ? (int64_t)cfg->scroll_lock_timeout_ms
+                             : (int64_t)cfg->touch_timeout_ms;
+
+    if (data->last_event_ms != 0 &&
+        (now - data->last_event_ms) > timeout) {
+        cs_reset(data, now);
+        LOG_DBG("CS: timeout (%s) -> reset",
+                locked ? "locked" : "detect/pointer");
     }
     data->last_event_ms = now;
 
@@ -272,12 +286,13 @@ static const struct zmk_input_processor_driver_api cs_driver_api = {
 #define CS_INST(n)                                                              \
     static struct cs_data cs_data_##n = {.mode = CS_MODE_DETECT};              \
     static const struct cs_config cs_config_##n = {                             \
-        .detect_samples    = DT_INST_PROP(n, detect_samples),                   \
-        .tang_threshold    = DT_INST_PROP(n, tang_threshold),                   \
-        .scroll_divisor    = DT_INST_PROP(n, scroll_divisor),                   \
-        .touch_timeout_ms  = DT_INST_PROP(n, touch_timeout_ms),                 \
-        .invert_vertical   = DT_INST_PROP(n, invert_vertical),                  \
-        .invert_horizontal = DT_INST_PROP(n, invert_horizontal),                \
+        .detect_samples          = DT_INST_PROP(n, detect_samples),              \
+        .tang_threshold          = DT_INST_PROP(n, tang_threshold),              \
+        .scroll_divisor          = DT_INST_PROP(n, scroll_divisor),              \
+        .touch_timeout_ms        = DT_INST_PROP(n, touch_timeout_ms),            \
+        .scroll_lock_timeout_ms  = DT_INST_PROP(n, scroll_lock_timeout_ms),      \
+        .invert_vertical         = DT_INST_PROP(n, invert_vertical),             \
+        .invert_horizontal       = DT_INST_PROP(n, invert_horizontal),           \
     };                                                                          \
     DEVICE_DT_INST_DEFINE(n, cs_init, NULL, &cs_data_##n, &cs_config_##n,      \
                           POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,     \

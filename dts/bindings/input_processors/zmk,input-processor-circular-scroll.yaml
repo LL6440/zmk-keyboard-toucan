@@ -62,9 +62,20 @@ properties:
     type: int
     default: 200
     description: |
-      Inactivity timeout in ms. If no REL events arrive for this long,
-      the processor resets and treats the next event as a new touch.
-      Covers Cirque drivers that do not emit explicit BTN_TOUCH events.
+      Inactivity timeout in ms during DETECT / POINTER mode.
+      If no REL events arrive for this long, the processor resets and
+      treats the next event as a new touch.
+
+  scroll-lock-timeout-ms:
+    type: int
+    default: 500
+    description: |
+      Inactivity timeout in ms when scroll mode is locked (SCROLL_V or
+      SCROLL_H).  Must be long enough that a brief pause in the circular
+      motion does NOT unlock the mode, but short enough that lifting the
+      finger resets it before the next touch.
+      500 ms is a good default: typical pauses in a circle are < 100 ms,
+      and lifting + repositioning takes > 500 ms.
 
   invert-vertical:
     type: boolean
