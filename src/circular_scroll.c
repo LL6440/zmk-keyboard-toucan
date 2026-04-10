@@ -46,9 +46,34 @@
 #include <zephyr/device.h>
 #include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
-#include <zmk/input_processor.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
+
+/*
+ * ── ZMK input processor API (defined locally) ────────────────────────────
+ *
+ * zmk/input_processor.h is an internal ZMK header that is not always
+ * reachable from external modules.  We reproduce the two structs we need
+ * here; their layout must match zmk/app/src/input_listener.c exactly.
+ * If ZMK ever changes this API the symptom would be a hard-fault at runtime.
+ */
+struct zmk_input_processor_state {
+    uint8_t current_layer;
+};
+
+__subsystem struct zmk_input_processor_driver_api {
+    int (*handle_event)(const struct device *dev,
+                        struct input_event *event,
+                        uint32_t param1, uint32_t param2,
+                        struct zmk_input_processor_state *state);
+};
+
+#define ZMK_INPUT_PROC_CONTINUE 0
+
+/* BTN_TOUCH (Linux / Zephyr HID code 0x14a). Guard against redefinition. */
+#ifndef INPUT_BTN_TOUCH
+#define INPUT_BTN_TOUCH 0x14au
+#endif
 
 #define DT_DRV_COMPAT zmk_input_processor_circular_scroll
 
