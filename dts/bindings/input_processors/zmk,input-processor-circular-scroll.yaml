@@ -2,29 +2,16 @@
 # SPDX-License-Identifier: MIT
 
 description: |
-  Circular gesture scroll input processor.
+  Circular gesture scroll input processor for ZMK.
 
-  Detects circular motion on a relative trackpad and converts it to
-  scroll events, without any layer restriction.
+  Detects circular motion on a trackpad using angular momentum and
+  converts it to WHEEL / HWHEEL events, without any layer restriction.
 
-  The processor runs a two-phase direction detection:
-    - Phase 1: accumulate movement direction over `detect-samples` events.
-    - Phase 2: accumulate the next `detect-samples` events.
-  If the angle between the two vectors is greater than ~60°, the motion
-  is classified as circular and scroll mode is locked.
-
-  The scroll axis is determined by the dominant direction of phase 1:
-    - Phase 1 mostly vertical   → vertical scroll
-    - Phase 1 mostly horizontal → horizontal scroll
-    - Straight / diagonal       → pointer (pass-through)
-
-  For vertical scroll:
-    - Clockwise rotation  → positive INPUT_REL_WHEEL value
-    - Counter-clockwise   → negative INPUT_REL_WHEEL value
-  Use `invert-vertical: true` to flip if your system expects the opposite.
-
-  Likewise for horizontal scroll with INPUT_REL_HWHEEL and
-  `invert-horizontal`.
+  During detection (detect-samples Y-events) the processor accumulates:
+    tang += cum_x * dy - cum_y * dx   (angular momentum)
+  If |tang| >= tang-threshold the motion is circular and scroll is locked.
+  The scroll axis is determined by the dominant direction of accumulated
+  movement (sum_dy vs sum_dx).
 
 compatible: "zmk,input-processor-circular-scroll"
 
@@ -35,57 +22,54 @@ properties:
     type: int
     required: true
     const: 0
-    description: No runtime parameters — all tuning is via DTS properties.
 
   track-remainders:
     type: boolean
     description: |
-      Whether ZMK's input listener should allocate a remainder slot for this
-      processor.  Our processor manages its own fractional scroll accumulation
-      internally (`scroll_accum` field), so leave this unset (false/0).
-      The property must be declared here so that Zephyr generates the
-      DT_N_S_circular_scroll_P_track_remainders macro that input_listener.c
-      requires for every input processor node.
+      Required by ZMK's input_listener to generate DT macros.
+      Leave unset (false) — the processor tracks its own accumulator.
 
   detect-samples:
     type: int
-    default: 6
+    default: 15
     description: |
-      Number of relative XY events accumulated in each detection phase.
-      Total detection window = 2 × detect-samples events before the mode
-      is locked.  At ~100 events/s that is ~120 ms for the default of 6.
-      Increase for stricter gesture recognition; decrease for faster
-      response.
+      Number of Y-events to observe before classifying the gesture.
+      At 100 Hz: 15 events ~= 150 ms.  Increase for slower, more
+      deliberate gestures; decrease for faster response.
+
+  tang-threshold:
+    type: int
+    default: 200
+    description: |
+      Minimum absolute angular momentum to classify as circular motion.
+      tang = sum(cum_x * dy - cum_y * dx) over detect-samples events.
+      For r=40, v=3 units/event, 15 events: tang ~= 1760 for a circle
+      and ~= 0 for a straight line.  Lower values trigger more easily;
+      higher values require a more pronounced circle.
 
   scroll-divisor:
     type: int
     default: 419
     description: |
-      Controls how many scroll ticks are emitted per full revolution.
-      Formula: ticks_per_revolution ≈ 6280 / scroll-divisor
-        419  → ~15 ticks/revolution  (default)
-        628  → ~10 ticks/revolution  (slower)
-        314  → ~20 ticks/revolution  (faster)
-      The threshold is computed as: r² × scroll-divisor / 1000,
-      where r is the approximate radius (in relative units) at the
-      moment the mode is locked.
+      Controls scroll sensitivity after mode is locked.
+      scroll_threshold = r_sq * scroll-divisor / 1000
+      Ticks per revolution ~= 2*pi*1000 / scroll-divisor
+        419 -> ~15 ticks/rev  (default)
+        628 -> ~10 ticks/rev  (slower)
+        314 -> ~20 ticks/rev  (faster)
 
   touch-timeout-ms:
     type: int
     default: 200
     description: |
-      If no relative events are received for this many milliseconds the
-      processor resets and treats the next event as a new touch.  This
-      covers Cirque drivers that do not emit explicit BTN_TOUCH events.
+      Inactivity timeout in ms. If no REL events arrive for this long,
+      the processor resets and treats the next event as a new touch.
+      Covers Cirque drivers that do not emit explicit BTN_TOUCH events.
 
   invert-vertical:
     type: boolean
-    description: |
-      Invert the sign of emitted INPUT_REL_WHEEL values.
-      Use when clockwise rotation scrolls in the wrong direction.
+    description: Invert INPUT_REL_WHEEL sign (flip CW scroll direction).
 
   invert-horizontal:
     type: boolean
-    description: |
-      Invert the sign of emitted INPUT_REL_HWHEEL values.
-      Use when clockwise rotation scrolls in the wrong direction.
+    description: Invert INPUT_REL_HWHEEL sign (flip CW scroll direction).

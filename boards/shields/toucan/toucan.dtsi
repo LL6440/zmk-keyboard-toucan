@@ -124,7 +124,16 @@
     circular_scroll: circular_scroll {
         compatible = "zmk,input-processor-circular-scroll";
         #input-processor-cells = <0>;
-        detect-samples    = <6>;
+        /*
+         * detect-samples: Y-events to observe before classifying (~150 ms at 100 Hz).
+         * tang-threshold: min |angular momentum| to confirm circular motion.
+         *   Lower  = triggers more easily (may fire on slight curves).
+         *   Higher = requires a more deliberate circle.
+         * scroll-divisor: lower = more scroll ticks per revolution.
+         *   419 -> ~15 ticks/rev.
+         */
+        detect-samples    = <15>;
+        tang-threshold    = <200>;
         scroll-divisor    = <419>;
         touch-timeout-ms  = <200>;
         /* invert-vertical; */   /* uncomment if CW scrolls up instead of down */
