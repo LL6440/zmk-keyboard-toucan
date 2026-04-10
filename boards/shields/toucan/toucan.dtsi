@@ -132,11 +132,11 @@
          * scroll-divisor: lower = more scroll ticks per revolution.
          *   419 -> ~15 ticks/rev.
          */
-        detect-samples    = <15>;
-        tang-threshold    = <200>;
-        scroll-divisor    = <419>;
-        touch-timeout-ms  = <200>;
-        scroll-lock-timeout-ms = <500>;
+        detect-samples          = <15>;
+        tang-threshold          = <200>;
+        scroll-divisor          = <419>;
+        touch-timeout-ms        = <200>;
+        scroll-lock-timeout-ms  = <500>;
         /* invert-vertical; */   /* uncomment if CW scrolls up instead of down */
         /* invert-horizontal; */ /* uncomment if CW scrolls left instead of right */
     };

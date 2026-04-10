@@ -5,13 +5,13 @@ description: |
   Circular gesture scroll input processor for ZMK.
 
   Detects circular motion on a trackpad using angular momentum and
-  converts it to WHEEL / HWHEEL events, without any layer restriction.
+  converts it to WHEEL / HWHEEL events on all layers.
 
-  During detection (detect-samples Y-events) the processor accumulates:
-    tang += cum_x * dy - cum_y * dx   (angular momentum)
-  If |tang| >= tang-threshold the motion is circular and scroll is locked.
-  The scroll axis is determined by the dominant direction of accumulated
-  movement (sum_dy vs sum_dx).
+  After detection the processor estimates the circle centre via an
+  exponential moving average of the finger position, and computes
+  the tangential component relative to that centre. This ensures
+  scroll direction stays consistent throughout the full revolution,
+  regardless of where on the trackpad the gesture starts.
 
 compatible: "zmk,input-processor-circular-scroll"
 
@@ -27,32 +27,25 @@ properties:
     type: boolean
     description: |
       Required by ZMK's input_listener to generate DT macros.
-      Leave unset (false) — the processor tracks its own accumulator.
+      Leave unset — the processor manages its own accumulator.
 
   detect-samples:
     type: int
     default: 15
     description: |
-      Number of Y-events to observe before classifying the gesture.
-      At 100 Hz: 15 events ~= 150 ms.  Increase for slower, more
-      deliberate gestures; decrease for faster response.
+      Y-events to observe before classifying the gesture (~150 ms at 100 Hz).
 
   tang-threshold:
     type: int
     default: 200
     description: |
-      Minimum absolute angular momentum to classify as circular motion.
-      tang = sum(cum_x * dy - cum_y * dx) over detect-samples events.
-      For r=40, v=3 units/event, 15 events: tang ~= 1760 for a circle
-      and ~= 0 for a straight line.  Lower values trigger more easily;
-      higher values require a more pronounced circle.
+      Minimum |angular momentum| to classify as circular motion.
+      Lower = triggers more easily. Higher = requires a more deliberate circle.
 
   scroll-divisor:
     type: int
     default: 419
     description: |
-      Controls scroll sensitivity after mode is locked.
-      scroll_threshold = r_sq * scroll-divisor / 1000
       Ticks per revolution ~= 2*pi*1000 / scroll-divisor
         419 -> ~15 ticks/rev  (default)
         628 -> ~10 ticks/rev  (slower)
@@ -62,25 +55,20 @@ properties:
     type: int
     default: 200
     description: |
-      Inactivity timeout in ms during DETECT / POINTER mode.
-      If no REL events arrive for this long, the processor resets and
-      treats the next event as a new touch.
+      Inactivity timeout (ms) in DETECT / POINTER mode.
 
   scroll-lock-timeout-ms:
     type: int
     default: 500
     description: |
-      Inactivity timeout in ms when scroll mode is locked (SCROLL_V or
-      SCROLL_H).  Must be long enough that a brief pause in the circular
-      motion does NOT unlock the mode, but short enough that lifting the
-      finger resets it before the next touch.
-      500 ms is a good default: typical pauses in a circle are < 100 ms,
-      and lifting + repositioning takes > 500 ms.
+      Inactivity timeout (ms) when scroll mode is locked.
+      Long enough to survive a pause in circular motion,
+      short enough to detect a genuine finger lift.
 
   invert-vertical:
     type: boolean
-    description: Invert INPUT_REL_WHEEL sign (flip CW scroll direction).
+    description: Invert INPUT_REL_WHEEL sign.
 
   invert-horizontal:
     type: boolean
-    description: Invert INPUT_REL_HWHEEL sign (flip CW scroll direction).
+    description: Invert INPUT_REL_HWHEEL sign.

@@ -1,49 +1,56 @@
 /*
  * Circular gesture scroll input processor for ZMK.
- *
- * Detects circular motion on a trackpad and converts it to scroll events.
  * Works on all layers — no layer restriction.
  *
- * === Why angular momentum, not two-phase direction comparison ===
+ * === Root cause of the "back-and-forth" bug (now fixed) ===
  *
- * A naive approach comparing the direction vector in two consecutive
- * windows fails for any realistic scroll speed: at 1 rev/3 s the
- * direction rotates only ~7° per 60 ms window, far below any useful
- * threshold.
+ * The tangential formula  tang = cum_x * dy - cum_y * dx
+ * computes angular momentum about the ORIGIN (touch-start point).
  *
- * Instead we accumulate the *angular momentum* of the finger relative
- * to its path from touch start:
+ * If the touch-start is OUTSIDE or ON the circle the user traces
+ * (which is always the case: the user places their finger at the edge
+ * of the pad and traces a circle whose centre is somewhere else),
+ * then the tangential oscillates between positive and negative on
+ * each revolution. This produces the observed back-and-forth scroll.
  *
- *   tang += cum_x * dy - cum_y * dx    (cross product of position x velocity)
+ * === Fix: use the circle centre as origin ===
  *
- * For circular motion this sum grows as r^2 * (angle swept).
- * For a straight line, cum and (dx,dy) are always parallel, so tang = 0.
- * This works reliably at any speed, even with small integer deltas.
+ * The time-average of any point on a circle is the circle's centre.
+ * We maintain an exponential moving average (EMA) of cum_x/cum_y:
  *
- * Example (r=40, v=3 units/event, 15 detect events):
- *   angle swept ~= 3*15/40 = 1.1 rad  ->  tang ~= 1.1 * 1600 = 1760
- *   straight line of the same length   ->  tang ~= 0
+ *   ema_x = ema_x * (W-1)/W + cum_x
+ *   ref_x  = ema_x / W               <- circle-centre estimate
  *
- * Default tang-threshold = 200, comfortably between these two values.
+ * Then:  tang = (cum_x - ref_x) * dy - (cum_y - ref_y) * dx
  *
- * === Axis detection ===
- * The dominant direction of accumulated movement during detection
- * (sum_dx, sum_dy) determines the scroll axis:
- *   |sum_dy| >= |sum_dx|  ->  VERTICAL scroll
- *   |sum_dx| >  |sum_dy|  ->  HORIZONTAL scroll
+ * As the finger goes around, ema converges to the circle centre.
+ * After the first half-turn (~W events lag) tang stays positive
+ * for CW and negative for CCW, cleanly driving the scroll.
  *
- * A purely radial motion (e.g. 3h toward center) accumulates no angular
- * momentum -> stays in POINTER mode.
+ * W = EMA_SHIFT (power of 2 for cheap division): default 8.
+ * ema_x is stored as W * actual_ref_x to avoid float.
  *
- * === Scroll calculation ===
- * After mode is locked the same tangential formula drives scroll.
- * Ticks are emitted when |scroll_accum| >= scroll_threshold.
- * scroll_threshold = r_sq * scroll_divisor / 1000, giving
- * ~= 2*pi*1000 / scroll_divisor ticks per full revolution.
- * Default divisor 419 -> ~= 15 ticks/revolution.
+ * === Detection ===
+ * During the first detect-samples Y-events we accumulate:
+ *   tang_detect += cum_x * dy - cum_y * dx  (origin = touch start)
+ * At that early stage the finger has moved < quarter circle, so
+ * origin-on-circle is fine: the tangential is always >= 0 and easily
+ * crosses tang-threshold.
+ * The dominant direction (sum_dx vs sum_dy) determines the axis.
  *
- * Clockwise rotation produces positive tangential values (positive WHEEL).
- * Use invert-vertical / invert-horizontal if the direction is wrong.
+ * === Scroll magnitude ===
+ * scroll_threshold = r_sq * scroll_divisor / 1000
+ * where r_sq is estimated at mode-lock time (using EMA centre).
+ * Ticks/revolution ~= 2*pi*1000 / scroll_divisor
+ * Default divisor 419 -> ~15 ticks/revolution.
+ *
+ * === Touch detection ===
+ * The Cirque Pinnacle in relative mode does not emit BTN_TOUCH events.
+ * Two timeouts:
+ *   - DETECT / POINTER : touch_timeout_ms (200 ms)
+ *   - SCROLL locked    : scroll_lock_timeout_ms (500 ms)
+ * Only a genuine finger lift (no events for the timeout period) resets
+ * the mode; a brief pause during circular motion does not.
  */
 
 #include <zephyr/kernel.h>
@@ -54,21 +61,16 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /*
- * ZMK input processor API defined locally: zmk/input_processor.h is an
- * internal header not always reachable from external modules.
+ * ZMK input processor API — defined locally because zmk/input_processor.h
+ * is not always reachable from external modules.
  * Layout must match zmk/app/src/pointing/input_listener.c.
  */
-struct zmk_input_processor_state {
-    uint8_t current_layer;
-};
-
+struct zmk_input_processor_state { uint8_t current_layer; };
 __subsystem struct zmk_input_processor_driver_api {
-    int (*handle_event)(const struct device *dev,
-                        struct input_event *event,
-                        uint32_t param1, uint32_t param2,
+    int (*handle_event)(const struct device *dev, struct input_event *event,
+                        uint32_t p1, uint32_t p2,
                         struct zmk_input_processor_state *state);
 };
-
 #define ZMK_INPUT_PROC_CONTINUE 0
 
 #ifndef INPUT_BTN_TOUCH
@@ -77,24 +79,35 @@ __subsystem struct zmk_input_processor_driver_api {
 
 #define DT_DRV_COMPAT zmk_input_processor_circular_scroll
 
-/* ── state machine ────────────────────────────────────────────────────── */
+/* Shift for EMA: ema stored as (2^EMA_SHIFT * actual_value) */
+#define EMA_SHIFT 3   /* window = 8 events */
 
-enum cs_mode {
-    CS_MODE_DETECT,
-    CS_MODE_POINTER,
-    CS_MODE_SCROLL_V,
-    CS_MODE_SCROLL_H,
-};
+/* ── state machine ───────────────────────────────────────────────────── */
+
+enum cs_mode { CS_MODE_DETECT, CS_MODE_POINTER, CS_MODE_SCROLL_V, CS_MODE_SCROLL_H };
 
 struct cs_data {
     enum cs_mode mode;
-    int32_t  sum_dx, sum_dy;
-    int32_t  cum_x, cum_y;
-    int64_t  tang_detect;
+
+    /* Accumulated position from touch start */
+    int32_t cum_x, cum_y;
+
+    /* EMA of cum (stored scaled by 2^EMA_SHIFT) — converges to circle centre */
+    int32_t ema_x, ema_y;
+
+    /* Detection accumulators */
+    int32_t  sum_dx, sum_dy;   /* direction sum for axis detection */
+    int64_t  tang_detect;      /* angular momentum during detection */
     int16_t  detect_count;
+
+    /* Pending X delta (paired with next Y event) */
     int32_t  pending_dx;
+
+    /* Scroll state */
     int64_t  scroll_accum;
     int32_t  scroll_threshold;
+
+    /* Timing */
     int64_t  last_event_ms;
 };
 
@@ -108,57 +121,62 @@ struct cs_config {
     bool     invert_horizontal;
 };
 
-/* ── helpers ──────────────────────────────────────────────────────────── */
+/* ── helpers ─────────────────────────────────────────────────────────── */
 
-static void cs_reset(struct cs_data *data, int64_t now)
+static void cs_reset(struct cs_data *d, int64_t now)
 {
-    memset(data, 0, sizeof(*data));
-    data->mode          = CS_MODE_DETECT;
-    data->last_event_ms = now;
+    memset(d, 0, sizeof(*d));
+    d->mode          = CS_MODE_DETECT;
+    d->last_event_ms = now;
 }
 
-static void cs_classify(struct cs_data *data, const struct cs_config *cfg)
+static void cs_classify(struct cs_data *d, const struct cs_config *cfg)
 {
-    int64_t abs_tang = data->tang_detect < 0 ? -data->tang_detect : data->tang_detect;
+    int64_t abs_tang = d->tang_detect < 0 ? -d->tang_detect : d->tang_detect;
 
     LOG_DBG("CS classify: tang=%lld threshold=%d dir=(%d,%d)",
-            data->tang_detect, cfg->tang_threshold,
-            data->sum_dx, data->sum_dy);
+            d->tang_detect, cfg->tang_threshold, d->sum_dx, d->sum_dy);
 
     if (abs_tang < (int64_t)cfg->tang_threshold) {
-        data->mode = CS_MODE_POINTER;
+        d->mode = CS_MODE_POINTER;
         LOG_DBG("CS: -> POINTER");
         return;
     }
 
-    int32_t abs_sdx = data->sum_dx < 0 ? -data->sum_dx : data->sum_dx;
-    int32_t abs_sdy = data->sum_dy < 0 ? -data->sum_dy : data->sum_dy;
+    int32_t adx = d->sum_dx < 0 ? -d->sum_dx : d->sum_dx;
+    int32_t ady = d->sum_dy < 0 ? -d->sum_dy : d->sum_dy;
+    d->mode = (ady >= adx) ? CS_MODE_SCROLL_V : CS_MODE_SCROLL_H;
+    LOG_DBG("CS: -> %s", d->mode == CS_MODE_SCROLL_V ? "SCROLL_V" : "SCROLL_H");
 
-    data->mode = (abs_sdy >= abs_sdx) ? CS_MODE_SCROLL_V : CS_MODE_SCROLL_H;
-    LOG_DBG("CS: -> %s", data->mode == CS_MODE_SCROLL_V ? "SCROLL_V" : "SCROLL_H");
+    /* Estimate r² from EMA centre: ref = ema / 8 */
+    int32_t ref_x = d->ema_x >> EMA_SHIFT;
+    int32_t ref_y = d->ema_y >> EMA_SHIFT;
+    int32_t rx    = d->cum_x - ref_x;
+    int32_t ry    = d->cum_y - ref_y;
+    int64_t r_sq  = (int64_t)rx * rx + (int64_t)ry * ry;
 
-    int64_t r_sq = (int64_t)data->cum_x * data->cum_x
-                 + (int64_t)data->cum_y * data->cum_y;
     int32_t thr = (int32_t)((r_sq * (int64_t)cfg->scroll_divisor) / 1000);
-    data->scroll_threshold = thr < 8 ? 8 : thr;
-    data->scroll_accum     = 0;
+    d->scroll_threshold = thr < 8 ? 8 : thr;
+    d->scroll_accum     = 0;
 
-    LOG_DBG("CS: r_sq=%lld scroll_threshold=%d", r_sq, data->scroll_threshold);
+    LOG_DBG("CS: r_sq=%lld scroll_threshold=%d ref=(%d,%d)",
+            r_sq, d->scroll_threshold, ref_x, ref_y);
 }
 
-/* ── event handler ────────────────────────────────────────────────────── */
+/* ── event handler ───────────────────────────────────────────────────── */
 
 static int cs_handle_event(const struct device *dev,
                            struct input_event *event,
-                           uint32_t param1, uint32_t param2,
+                           uint32_t p1, uint32_t p2,
                            struct zmk_input_processor_state *state)
 {
-    struct cs_data         *data = dev->data;
-    const struct cs_config *cfg  = dev->config;
-    int64_t                 now  = k_uptime_get();
+    struct cs_data         *d   = dev->data;
+    const struct cs_config *cfg = dev->config;
+    int64_t                 now = k_uptime_get();
 
+    /* BTN_TOUCH: always reset (finger lift / new touch) */
     if (event->type == INPUT_EV_KEY && event->code == INPUT_BTN_TOUCH) {
-        cs_reset(data, now);
+        cs_reset(d, now);
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
@@ -172,99 +190,104 @@ static int cs_handle_event(const struct device *dev,
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    /* Timeout-based finger-lift detection.
-     * The Cirque Pinnacle in relative mode does not emit BTN_TOUCH events,
-     * so we rely on inactivity to detect that the finger was lifted.
-     *
-     * Two different timeouts:
-     *   - DETECT / POINTER : touch_timeout_ms (200 ms default)
-     *     Fast reset so a new gesture can start quickly.
-     *   - SCROLL_V / SCROLL_H : scroll_lock_timeout_ms (500 ms default)
-     *     Long enough that a brief pause in circular motion does NOT
-     *     unlock, but short enough that lifting the finger does unlock
-     *     before the next touch lands.
-     */
-    bool locked = (data->mode == CS_MODE_SCROLL_V ||
-                   data->mode == CS_MODE_SCROLL_H);
-    int64_t timeout = locked ? (int64_t)cfg->scroll_lock_timeout_ms
-                             : (int64_t)cfg->touch_timeout_ms;
-
-    if (data->last_event_ms != 0 &&
-        (now - data->last_event_ms) > timeout) {
-        cs_reset(data, now);
-        LOG_DBG("CS: timeout (%s) -> reset",
-                locked ? "locked" : "detect/pointer");
+    /* Timeout: two thresholds depending on whether scroll is locked */
+    bool locked = (d->mode == CS_MODE_SCROLL_V || d->mode == CS_MODE_SCROLL_H);
+    int64_t tmo = locked ? (int64_t)cfg->scroll_lock_timeout_ms
+                         : (int64_t)cfg->touch_timeout_ms;
+    if (d->last_event_ms != 0 && (now - d->last_event_ms) > tmo) {
+        cs_reset(d, now);
+        LOG_DBG("CS: timeout (%s) -> reset", locked ? "locked" : "detect");
     }
-    data->last_event_ms = now;
+    d->last_event_ms = now;
 
-    if (data->mode == CS_MODE_POINTER) {
+    /* POINTER: pass through */
+    if (d->mode == CS_MODE_POINTER) {
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
+    /* Buffer X; process paired (dx, dy) on Y event.
+     * In non-pointer modes we suppress the raw X/Y by zeroing them;
+     * scroll events are emitted in their place on the Y event. */
     if (is_x) {
-        data->pending_dx = event->value;
-        event->value = 0;
+        d->pending_dx = event->value;
+        event->value  = 0;
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    /* --- Y event: process paired (dx, dy) --- */
-    int32_t dx = data->pending_dx;
+    int32_t dx = d->pending_dx;
     int32_t dy = event->value;
-    data->pending_dx = 0;
+    d->pending_dx = 0;
 
-    switch (data->mode) {
+    switch (d->mode) {
 
+    /* ── Detection ─────────────────────────────────────────────────── */
     case CS_MODE_DETECT:
-        data->sum_dx += dx;
-        data->sum_dy += dy;
-        data->tang_detect += (int64_t)data->cum_x * dy
-                           - (int64_t)data->cum_y * dx;
-        data->cum_x += dx;
-        data->cum_y += dy;
-        data->detect_count++;
+        d->sum_dx += dx;
+        d->sum_dy += dy;
+
+        /* tang from touch-start origin (fine for the first quarter circle) */
+        d->tang_detect += (int64_t)d->cum_x * dy - (int64_t)d->cum_y * dx;
+
+        /* Update position */
+        d->cum_x += dx;
+        d->cum_y += dy;
+
+        /* Update EMA: ema = ema * 7/8 + cum  (stored as 8 * actual) */
+        d->ema_x = d->ema_x - (d->ema_x >> EMA_SHIFT) + d->cum_x;
+        d->ema_y = d->ema_y - (d->ema_y >> EMA_SHIFT) + d->cum_y;
+
+        d->detect_count++;
         event->value = 0;
-        if (data->detect_count >= cfg->detect_samples) {
-            cs_classify(data, cfg);
+
+        if (d->detect_count >= cfg->detect_samples) {
+            cs_classify(d, cfg);
         }
         break;
 
-    case CS_MODE_SCROLL_V: {
-        int64_t tangential = (int64_t)data->cum_x * dy
-                           - (int64_t)data->cum_y * dx;
-        data->cum_x += dx;
-        data->cum_y += dy;
-        data->scroll_accum += tangential;
-
-        int32_t ticks = 0;
-        if (data->scroll_accum >= data->scroll_threshold) {
-            ticks = (int32_t)(data->scroll_accum / data->scroll_threshold);
-            data->scroll_accum -= (int64_t)ticks * data->scroll_threshold;
-        } else if (data->scroll_accum <= -(int64_t)data->scroll_threshold) {
-            ticks = (int32_t)(data->scroll_accum / data->scroll_threshold);
-            data->scroll_accum -= (int64_t)ticks * data->scroll_threshold;
-        }
-        event->code  = INPUT_REL_WHEEL;
-        event->value = cfg->invert_vertical ? -ticks : ticks;
-        break;
-    }
-
+    /* ── Scroll (vertical or horizontal) ───────────────────────────── */
+    case CS_MODE_SCROLL_V:
     case CS_MODE_SCROLL_H: {
-        int64_t tangential = (int64_t)data->cum_x * dy
-                           - (int64_t)data->cum_y * dx;
-        data->cum_x += dx;
-        data->cum_y += dy;
-        data->scroll_accum += tangential;
+
+        /* Update position */
+        d->cum_x += dx;
+        d->cum_y += dy;
+
+        /* Update EMA centre estimate */
+        d->ema_x = d->ema_x - (d->ema_x >> EMA_SHIFT) + d->cum_x;
+        d->ema_y = d->ema_y - (d->ema_y >> EMA_SHIFT) + d->cum_y;
+
+        /* Position relative to estimated circle centre */
+        int32_t ref_x = d->ema_x >> EMA_SHIFT;
+        int32_t ref_y = d->ema_y >> EMA_SHIFT;
+        int32_t rx    = d->cum_x - ref_x;
+        int32_t ry    = d->cum_y - ref_y;
+
+        /*
+         * Tangential component using PREVIOUS position (before this event).
+         * We already added dx/dy to cum, so previous = current - delta.
+         */
+        int32_t prev_rx = rx - dx;
+        int32_t prev_ry = ry - dy;
+        int64_t tangential = (int64_t)prev_rx * dy - (int64_t)prev_ry * dx;
+
+        d->scroll_accum += tangential;
 
         int32_t ticks = 0;
-        if (data->scroll_accum >= data->scroll_threshold) {
-            ticks = (int32_t)(data->scroll_accum / data->scroll_threshold);
-            data->scroll_accum -= (int64_t)ticks * data->scroll_threshold;
-        } else if (data->scroll_accum <= -(int64_t)data->scroll_threshold) {
-            ticks = (int32_t)(data->scroll_accum / data->scroll_threshold);
-            data->scroll_accum -= (int64_t)ticks * data->scroll_threshold;
+        if (d->scroll_accum >= d->scroll_threshold) {
+            ticks = (int32_t)(d->scroll_accum / d->scroll_threshold);
+            d->scroll_accum -= (int64_t)ticks * d->scroll_threshold;
+        } else if (d->scroll_accum <= -(int64_t)d->scroll_threshold) {
+            ticks = (int32_t)(d->scroll_accum / d->scroll_threshold);
+            d->scroll_accum -= (int64_t)ticks * d->scroll_threshold;
         }
-        event->code  = INPUT_REL_HWHEEL;
-        event->value = cfg->invert_horizontal ? -ticks : ticks;
+
+        if (d->mode == CS_MODE_SCROLL_V) {
+            event->code  = INPUT_REL_WHEEL;
+            event->value = cfg->invert_vertical   ? -ticks : ticks;
+        } else {
+            event->code  = INPUT_REL_HWHEEL;
+            event->value = cfg->invert_horizontal ? -ticks : ticks;
+        }
         break;
     }
 
@@ -275,7 +298,7 @@ static int cs_handle_event(const struct device *dev,
     return ZMK_INPUT_PROC_CONTINUE;
 }
 
-/* ── driver boilerplate ───────────────────────────────────────────────── */
+/* ── driver boilerplate ──────────────────────────────────────────────── */
 
 static int cs_init(const struct device *dev) { return 0; }
 
@@ -283,19 +306,19 @@ static const struct zmk_input_processor_driver_api cs_driver_api = {
     .handle_event = cs_handle_event,
 };
 
-#define CS_INST(n)                                                              \
-    static struct cs_data cs_data_##n = {.mode = CS_MODE_DETECT};              \
-    static const struct cs_config cs_config_##n = {                             \
-        .detect_samples          = DT_INST_PROP(n, detect_samples),              \
-        .tang_threshold          = DT_INST_PROP(n, tang_threshold),              \
-        .scroll_divisor          = DT_INST_PROP(n, scroll_divisor),              \
-        .touch_timeout_ms        = DT_INST_PROP(n, touch_timeout_ms),            \
-        .scroll_lock_timeout_ms  = DT_INST_PROP(n, scroll_lock_timeout_ms),      \
-        .invert_vertical         = DT_INST_PROP(n, invert_vertical),             \
-        .invert_horizontal       = DT_INST_PROP(n, invert_horizontal),           \
-    };                                                                          \
-    DEVICE_DT_INST_DEFINE(n, cs_init, NULL, &cs_data_##n, &cs_config_##n,      \
-                          POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,     \
+#define CS_INST(n)                                                                  \
+    static struct cs_data cs_data_##n = {.mode = CS_MODE_DETECT};                  \
+    static const struct cs_config cs_config_##n = {                                 \
+        .detect_samples         = DT_INST_PROP(n, detect_samples),                  \
+        .tang_threshold         = DT_INST_PROP(n, tang_threshold),                  \
+        .scroll_divisor         = DT_INST_PROP(n, scroll_divisor),                  \
+        .touch_timeout_ms       = DT_INST_PROP(n, touch_timeout_ms),                \
+        .scroll_lock_timeout_ms = DT_INST_PROP(n, scroll_lock_timeout_ms),          \
+        .invert_vertical        = DT_INST_PROP(n, invert_vertical),                 \
+        .invert_horizontal      = DT_INST_PROP(n, invert_horizontal),               \
+    };                                                                              \
+    DEVICE_DT_INST_DEFINE(n, cs_init, NULL, &cs_data_##n, &cs_config_##n,          \
+                          POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,         \
                           &cs_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(CS_INST)
