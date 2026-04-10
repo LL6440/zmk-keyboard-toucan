@@ -171,10 +171,15 @@ static int cs_handle_event(const struct device *dev,
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    if (data->last_event_ms != 0 &&
-        (now - data->last_event_ms) > (int64_t)cfg->touch_timeout_ms) {
-        cs_reset(data, now);
-        LOG_DBG("CS: timeout -> new touch");
+    /* In locked scroll mode, ONLY BTN_TOUCH (handled above) resets the mode.
+     * The timeout is only used during DETECT / POINTER to detect a new touch
+     * on drivers that do not emit BTN_TOUCH events. */
+    if (data->mode != CS_MODE_SCROLL_V && data->mode != CS_MODE_SCROLL_H) {
+        if (data->last_event_ms != 0 &&
+            (now - data->last_event_ms) > (int64_t)cfg->touch_timeout_ms) {
+            cs_reset(data, now);
+            LOG_DBG("CS: timeout -> new touch");
+        }
     }
     data->last_event_ms = now;
 
