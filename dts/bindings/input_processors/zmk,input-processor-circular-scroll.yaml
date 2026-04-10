@@ -37,6 +37,16 @@ properties:
     const: 0
     description: No runtime parameters — all tuning is via DTS properties.
 
+  track-remainders:
+    type: boolean
+    description: |
+      Whether ZMK's input listener should allocate a remainder slot for this
+      processor.  Our processor manages its own fractional scroll accumulation
+      internally (`scroll_accum` field), so leave this unset (false/0).
+      The property must be declared here so that Zephyr generates the
+      DT_N_S_circular_scroll_P_track_remainders macro that input_listener.c
+      requires for every input processor node.
+
   detect-samples:
     type: int
     default: 6
